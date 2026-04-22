@@ -1,0 +1,8 @@
+First Name,Last Name,Service Date,Actual Time In,Actual Time Out,Service Code,Earnings Code,Service Description,Pay Units
+Jane,Doe,2026-01-02,08:15 AM,09:00 AM,RNV,,Visit,1.0
+Jane,Doe,2026-01-02,11:00 AM,01:30 PM,RNV,,Visit,2.5
+John,Smith,2026-02-10,09:00 AM,11:00 AM,RNV,,Visit,2.0
+Mia,Stone,2026-03-02,07:00,15:00,RNV,,Visit,8.0
+Alex,Kim,2026-04-01,08:00 AM,09:00 AM,RNV,,Visit,1.0
+Alex,Kim,2026-04-01,10:00 AM,11:00 AM,RNV,,Visit,1.0
+Jane,Doe,2026-01-02,05:00 PM,05:30 PM,PatPC,,Patient Phone Calls,0.5

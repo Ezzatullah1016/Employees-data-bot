@@ -1,0 +1,13 @@
+session_id,book_title,child_name,created_by,status,room_type
+44df870e-4edf-4e48-a8f8-99bb3d9d2ca5,Invite Story a4bc2c,Aya,inviteowner_a4bc2c,pending,reading
+b913d739-f654-42d3-be12-069537d8fb67,Smoke Session 10f447,Safa,sessionowner_10f447,cancelled,reading
+756b3a5c-3da3-45fe-b336-6030f9198f91,Pack Story afec0a,Omar,packuser_afec0a,pending,reading
+e584d5c3-f759-4634-b142-1625383eb40c,Sub Story d8aeea,Mina,subuser_d8aeea,pending,reading
+76ee8901-0335-440d-8768-0b7659d73697,Entitlement Story 2ca2ae,Nina,entitlement_2ca2ae,pending,reading
+620faefd-e399-4aa5-884d-1b2bd1c2e183,Smoke Story 059567,Lena,smokeparent_059567,completed,reading
+ad556eee-3b0a-4a47-83f7-43cc5ef4713f,Smoke Story,Lena,smokeparent,completed,reading
+3e3bd7d1-2150-4478-b34d-65416542ceea,Report Live Story,Ava,reportowner,completed,reading
+72560159-4180-4156-912b-4d08afe2a2a6,Snapshot Book 579480,Ivy,snapshot579480,pending,reading
+d116e548-8e07-432f-80c6-ecf6e0b22223,Complete Book 579211,Luna,complete579211,completed,reading
+b111aa0f-7330-4451-980a-cae6d3ea3d4c,Lobby Book 578866,Luna,lobby578866,active,reading
+c6374e32-1086-408c-a751-fc96164cbfe7,Live Book 577821,Luna,flow577821,pending,reading

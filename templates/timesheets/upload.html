@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row g-4 mb-4">
+    <div class="col-lg-8">
+        <div class="glass-card p-4 p-lg-5 h-100">
+            <h1 class="h3 mb-3">Automated Daily Timesheet Formatter</h1>
+            <p class="text-secondary mb-0">
+                Upload healthcare visit logs and let the AI bot generate clean daily timesheets grouped by employee and service date.
+                Built for speed and accuracy with large files.
+            </p>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="glass-card p-4 h-100">
+            <div class="d-flex align-items-center mb-3">
+                <span class="bot-dot"></span>
+                <span class="fw-semibold text-success">Bot Ready</span>
+            </div>
+            <div class="small text-secondary">Accepted files: .xlsx, .xls, .csv</div>
+            <div class="small text-secondary">Grouping: Employee + Service Date</div>
+            <div class="small text-secondary">Output: Downloadable Excel report</div>
+        </div>
+    </div>
+</div>
+
+<div class="row justify-content-center">
+    <div class="col-lg-12">
+        <div class="glass-card mb-4">
+            <div class="card-body p-4">
+                <h2 class="h4 mb-3">Upload Source File</h2>
+                <p class="text-muted mb-3">Required columns: First Name, Last Name, Service Date, Actual Time In, Actual Time Out.</p>
+                <form method="post" enctype="multipart/form-data" class="row g-3">
+                    {% csrf_token %}
+                    <div class="col-md-9">
+                        {{ form.file.label_tag }}
+                        {{ form.file }}
+                        {% if form.file.help_text %}
+                            <div class="form-text">{{ form.file.help_text }}</div>
+                        {% endif %}
+                        {% if form.file.errors %}
+                            <div class="text-danger small">{{ form.file.errors }}</div>
+                        {% endif %}
+                    </div>
+                    <div class="col-md-3 d-grid align-self-end">
+                        <button class="btn btn-primary btn-lg" type="submit">Run Bot</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        {% if processed and processed.status == "SUCCESS" %}
+            <div class="row g-3 mb-3">
+                <div class="col-md-4">
+                    <div class="glass-card p-3">
+                        <div class="small text-muted">Employees</div>
+                        <div class="h4 m-0">{{ summary.employees }}</div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="glass-card p-3">
+                        <div class="small text-muted">Employee-Day Records</div>
+                        <div class="h4 m-0">{{ summary.days }}</div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="glass-card p-3">
+                        <div class="small text-muted">Total Hours</div>
+                        <div class="h4 m-0">{{ summary.hours }}</div>
+                    </div>
+                </div>
+            </div>
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h3 class="h5 m-0">Formatted Daily Timesheet</h3>
+                <a class="btn btn-success" href="{% url 'download_processed_file' processed.id %}">
+                    Download Excel
+                </a>
+            </div>
+        {% endif %}
+
+        {% if preview_rows %}
+            <div class="table-responsive glass-card p-2">
+                <table class="table table-hover table-bordered align-middle bg-white mb-0">
+                    <thead class="table-light">
+                    <tr>
+                        <th>Employee</th>
+                        <th>Service Date</th>
+                        <th>Earliest Actual Time In</th>
+                        <th>Latest Actual Time Out</th>
+                        <th>Call Hours Added</th>
+                        <th>Total Hours Worked</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {% for row in preview_rows %}
+                        <tr>
+                            <td>{{ row.employee }}</td>
+                            <td>{{ row.service_date }}</td>
+                            <td>{{ row.earliest_time_in }}</td>
+                            <td>{{ row.latest_time_out }}</td>
+                            <td>{{ row.call_hours_added }}</td>
+                            <td>{{ row.total_hours_worked }}</td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

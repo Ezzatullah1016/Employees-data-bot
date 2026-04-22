@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div id="app"></div>
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel">
+const { useRef, useState } = React;
+
+function App() {
+  const [file, setFile] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [rows, setRows] = useState([]);
+  const [downloadUrl, setDownloadUrl] = useState("");
+  const [dragActive, setDragActive] = useState(false);
+  const inputRef = useRef(null);
+
+  function pickFile() {
+    inputRef.current?.click();
+  }
+
+  function onFilePicked(nextFile) {
+    setFile(nextFile || null);
+    setError("");
+  }
+
+  function onDragOver(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(true);
+  }
+
+  function onDragLeave(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+  }
+
+  function onDrop(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    const dropped = e.dataTransfer?.files?.[0];
+    if (dropped) {
+      onFilePicked(dropped);
+    }
+  }
+
+  async function runBot(e) {
+    e.preventDefault();
+    setError("");
+    setRows([]);
+    setDownloadUrl("");
+
+    if (!file) {
+      setError("Please choose a file first.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const response = await fetch("/api/process/", { method: "POST", body });
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || "Unable to process the uploaded file.");
+      }
+      setRows(data.preview_rows || []);
+      setDownloadUrl(data.download_url || "");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div>
+      <div className="row g-4 mb-4">
+        <div className="col-lg-8">
+          <div className="glass-card p-4 p-lg-5 h-100">
+            <h1 className="h3 mb-3">CareOps Timesheet AI Bot</h1>
+            <p className="text-secondary mb-0">
+              Upload CSV or Excel, and the bot returns daily grouped timesheet output with start time, end time, and total hours.
+            </p>
+          </div>
+        </div>
+        <div className="col-lg-4">
+          <div className="glass-card p-4 h-100">
+            <div className="d-flex align-items-center mb-2">
+              <span className="bot-dot"></span>
+              <span className="fw-semibold text-success">Bot Online</span>
+            </div>
+            <div className="small text-secondary">Optimized for 1000+ rows</div>
+            <div className="small text-secondary">Accepts .csv, .xlsx, .xls</div>
+            <div className="small text-secondary">Download polished Excel output</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="glass-card p-4 mb-4">
+        <form onSubmit={runBot} className="row g-3">
+          <div className="col-md-9">
+            <label className="form-label fw-semibold">Upload timesheet file</label>
+            <input
+              ref={inputRef}
+              type="file"
+              className="hidden-input"
+              accept=".csv,.xlsx,.xls"
+              onChange={(e) => onFilePicked(e.target.files?.[0] || null)}
+            />
+            <div
+              role="button"
+              tabIndex={0}
+              className={`drop-zone p-4 ${dragActive ? "active" : ""}`}
+              onClick={pickFile}
+              onDragOver={onDragOver}
+              onDragEnter={onDragOver}
+              onDragLeave={onDragLeave}
+              onDrop={onDrop}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  pickFile();
+                }
+              }}
+            >
+              <div className="fw-semibold mb-1">Drag & drop file here</div>
+              <div className="small text-secondary">or click to browse your computer</div>
+              <div className="small text-secondary mt-2">
+                Accepted: .csv, .xlsx, .xls
+              </div>
+              {file && (
+                <div className="mt-3 small text-primary fw-semibold">
+                  Selected: {file.name}
+                </div>
+              )}
+            </div>
+            <div className="form-text">
+              Required columns: First Name, Last Name, Service Date, Actual Time In, Actual Time Out.
+            </div>
+          </div>
+          <div className="col-md-3 d-grid align-self-end">
+            <button className="btn btn-primary btn-lg" disabled={loading}>
+              {loading ? "Processing..." : "Run Bot"}
+            </button>
+          </div>
+        </form>
+        {error && <div className="alert alert-danger mt-3 mb-0">{error}</div>}
+      </div>
+
+      {downloadUrl && (
+        <div className="mb-3">
+          <a className="btn btn-success" href={downloadUrl}>Download Formatted Excel</a>
+          <div className="small text-secondary mt-2">
+            Totals (Employees, Employee-Day Records, Total Hours) are included in the downloaded Excel file.
+          </div>
+        </div>
+      )}
+
+      {rows.length > 0 && (
+        <div className="table-responsive glass-card p-2">
+          <table className="table table-hover table-bordered align-middle bg-white mb-0">
+            <thead className="table-light">
+              <tr>
+                <th>Employee</th>
+                <th>Service Date</th>
+                <th>Earliest Actual Time In</th>
+                <th>Latest Actual Time Out</th>
+                <th>Call Hours Added</th>
+                <th>Total Hours Worked</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, idx) => (
+                <tr key={idx}>
+                  <td>{row.employee}</td>
+                  <td>{row.service_date}</td>
+                  <td>{row.earliest_time_in}</td>
+                  <td>{row.latest_time_out}</td>
+                  <td>{row.call_hours_added}</td>
+                  <td>{row.total_hours_worked}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("app")).render(<App />);
+</script>
+{% endblock %}
