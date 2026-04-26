@@ -3,7 +3,7 @@ from io import BytesIO
 import pandas as pd
 from django.test import SimpleTestCase
 
-from .services import process_timesheet
+from .services import filter_timesheet_fact_rows, process_timesheet
 
 
 class ProcessTimesheetTests(SimpleTestCase):
@@ -144,3 +144,77 @@ class ProcessTimesheetTests(SimpleTestCase):
         self.assertEqual(output_df.iloc[0]["Latest Actual Time Out"], "10:00 AM")
         self.assertEqual(output_df.iloc[0]["Call Hours Added"], 0.5)
         self.assertEqual(output_df.iloc[0]["Total Hours Worked"], 2.5)
+
+    def test_employee_hours_summary_multi_week_pivot(self):
+        source = pd.DataFrame(
+            [
+                {
+                    "First Name": "Jane",
+                    "Last Name": "Doe",
+                    "Service Date": "2026-01-06",
+                    "Actual Time In": "08:00 AM",
+                    "Actual Time Out": "12:00 PM",
+                },
+                {
+                    "First Name": "Jane",
+                    "Last Name": "Doe",
+                    "Service Date": "2026-01-13",
+                    "Actual Time In": "09:00 AM",
+                    "Actual Time Out": "01:00 PM",
+                },
+            ]
+        )
+        input_stream = BytesIO()
+        source.to_excel(input_stream, index=False)
+        input_stream.seek(0)
+
+        output_df, excel_buf = process_timesheet(input_stream, filename="input.xlsx")
+
+        self.assertEqual(len(output_df), 2)
+        detail_sum = round(float(output_df["Total Hours Worked"].sum()), 2)
+        summary_df = pd.read_excel(excel_buf, sheet_name="Employee Hours Summary")
+        self.assertEqual(round(float(summary_df.iloc[0]["total_hours"]), 2), detail_sum)
+        self.assertIn("2026-W02", summary_df.columns)
+        self.assertIn("2026-W03", summary_df.columns)
+        self.assertEqual(float(summary_df.iloc[0]["2026-W02"]), 4.0)
+        self.assertEqual(float(summary_df.iloc[0]["2026-W03"]), 4.0)
+
+        kpi = pd.read_excel(excel_buf, sheet_name="Summary")
+        self.assertEqual(float(kpi.loc[kpi["Metric"] == "Total Hours", "Value"].iloc[0]), detail_sum)
+        self.assertEqual(
+            float(kpi.loc[kpi["Metric"] == "Sum of employee total hours", "Value"].iloc[0]),
+            detail_sum,
+        )
+
+    def test_employee_hours_summary_splits_identifier_from_label(self):
+        source = pd.DataFrame(
+            [
+                {
+                    "Identifier": "PV1",
+                    "First Name": "Jane",
+                    "Last Name": "Doe",
+                    "Service Date": "2026-01-06",
+                    "Actual Time In": "08:00 AM",
+                    "Actual Time Out": "10:00 AM",
+                },
+            ]
+        )
+        input_stream = BytesIO()
+        source.to_excel(input_stream, index=False)
+        input_stream.seek(0)
+
+        _, excel_buf = process_timesheet(input_stream, filename="input.xlsx")
+        summary_df = pd.read_excel(excel_buf, sheet_name="Employee Hours Summary")
+        self.assertEqual(summary_df.iloc[0]["employee_name"], "Doe, Jane")
+        self.assertEqual(summary_df.iloc[0]["employee_id"], "PV1")
+
+    def test_filter_timesheet_fact_rows_excludes_totals(self):
+        frame = pd.DataFrame(
+            {
+                "Employee": ["Doe, Jane", "Grand Total (Doe, Jane)", "OVERALL GRAND TOTAL"],
+                "Total Hours Worked": [3.0, 3.0, 3.0],
+            }
+        )
+        filtered = filter_timesheet_fact_rows(frame)
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered.iloc[0]["Employee"], "Doe, Jane")

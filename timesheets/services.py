@@ -28,6 +28,29 @@ HEADER_ALIASES = {
     "Pay Units": {"pay units", "units"},
 }
 CALL_PAY_CODES = {"PATPC"}
+_EMPLOYEE_LABEL_ID = re.compile(r"^(.*) \(([^)]+)\)$")
+
+
+def _split_employee_label(label: str) -> tuple[str, str]:
+    m = _EMPLOYEE_LABEL_ID.match(str(label).strip())
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return str(label).strip(), ""
+
+
+def _iso_week_column_label(service_date) -> pd.Series:
+    ts = pd.to_datetime(service_date)
+    cal = ts.dt.isocalendar()
+    return (
+        cal["year"].astype("int64").astype(str)
+        + "-W"
+        + cal["week"].astype("int64").astype(str).str.zfill(2)
+    )
+
+
+def _parse_iso_week_column(label: str) -> tuple[int, int]:
+    year_s, week_s = str(label).split("-W", 1)
+    return int(year_s), int(week_s)
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -193,15 +216,44 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
     grouped["Total Hours Worked"] = grouped["Visit Span Hours"] + grouped["Call_Hours_Added"]
     grouped = grouped.sort_values(["Employee", "Service Date"])
 
+    grouped["Week_Column"] = _iso_week_column_label(grouped["Service Date"])
+    weekly_by_label = (
+        grouped.groupby(["Employee Label", "Week_Column"], sort=False)["Total Hours Worked"]
+        .sum()
+        .reset_index()
+    )
+    hours_pivot = weekly_by_label.pivot_table(
+        index="Employee Label",
+        columns="Week_Column",
+        values="Total Hours Worked",
+        aggfunc="sum",
+        fill_value=0.0,
+    )
+    week_columns = sorted(hours_pivot.columns, key=_parse_iso_week_column)
+    hours_pivot = hours_pivot.reindex(columns=week_columns, fill_value=0.0)
+    label_order = grouped["Employee Label"].drop_duplicates().tolist()
+    hours_pivot = hours_pivot.reindex(label_order).fillna(0.0)
+    hours_per_label = grouped.groupby("Employee Label", sort=False)["Total Hours Worked"].sum()
 
-    # Calculate total number of weeks per employee
-    grouped["Year"] = pd.to_datetime(grouped["Service Date"]).dt.isocalendar().year
-    grouped["Week"] = pd.to_datetime(grouped["Service Date"]).dt.isocalendar().week
-    week_rows = grouped[["Employee", "Year", "Week"]].drop_duplicates()
-    employee_weeks = week_rows.groupby("Employee").size().to_dict()
+    employee_hours_rows: list[dict[str, str | float]] = []
+    for label in label_order:
+        if label not in hours_pivot.index:
+            continue
+        emp_name, emp_id = _split_employee_label(label)
+        row: dict[str, str | float] = {"employee_name": emp_name, "employee_id": emp_id}
+        for wc in week_columns:
+            row[wc] = round(float(hours_pivot.loc[label, wc]), 2)
+        row["total_hours"] = round(float(hours_per_label.loc[label]), 2)
+        employee_hours_rows.append(row)
 
-    # Map employee to total weeks for column
-    grouped["Total Weeks"] = grouped["Employee"].map(employee_weeks)
+    employee_hours_df = pd.DataFrame(employee_hours_rows)
+    detail_hours_total = round(float(grouped["Total Hours Worked"].sum()), 2)
+    summary_hours_total = round(float(employee_hours_df["total_hours"].sum()), 2) if len(employee_hours_df) else 0.0
+    if employee_hours_rows and summary_hours_total != detail_hours_total:
+        raise ValueError(
+            "Internal validation failed: employee hours summary does not match timesheet detail totals."
+        )
+
     output = pd.DataFrame(
         {
             "Employee": grouped["Employee Label"],
@@ -210,22 +262,20 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
             "Latest Actual Time Out": grouped["Latest_Time_Out"].dt.strftime("%I:%M %p").fillna(""),
             "Call Hours Added": grouped["Call_Hours_Added"].round(2),
             "Total Hours Worked": grouped["Total Hours Worked"].round(2),
-            "Total Weeks": grouped["Total Weeks"],
         }
     )
 
     summary = {
         "Employees": int(grouped["Employee"].nunique()),
         "Employee-Day Records": int(len(output)),
-        "Total Hours": round(float(output["Total Hours Worked"].sum()), 2),
-        "Employee Weeks": employee_weeks,
+        "Total Hours": detail_hours_total,
+        "Sum Employee Total Hours": summary_hours_total,
     }
 
     # Build a printable report with per-employee totals and a final grand total row.
     report_rows: list[dict[str, str | float]] = []
     for employee_key, employee_group in grouped.groupby("Employee", sort=False):
         employee_label = employee_group["Employee Label"].iloc[0]
-        total_weeks = employee_weeks.get(employee_key, 0)
         for _, row in employee_group.iterrows():
             report_rows.append(
                 {
@@ -243,7 +293,6 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
                     ),
                     "Call Hours Added": round(float(row["Call_Hours_Added"]), 2),
                     "Total Hours Worked": round(float(row["Total Hours Worked"]), 2),
-                    "Total Weeks": total_weeks,
                 }
             )
         report_rows.append(
@@ -260,7 +309,6 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
                     float(grouped.loc[grouped["Employee"] == employee_key, "Total Hours Worked"].sum()),
                     2,
                 ),
-                "Total Weeks": total_weeks,
             }
         )
 
@@ -272,7 +320,6 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
             "Latest Actual Time Out": "",
             "Call Hours Added": round(float(grouped["Call_Hours_Added"].sum()), 2),
             "Total Hours Worked": summary["Total Hours"],
-            "Total Weeks": "",
         }
     )
     formatted_output = pd.DataFrame(report_rows)
@@ -329,23 +376,58 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
         summary_sheet.write_number("B3", summary["Employee-Day Records"], value_fmt)
         summary_sheet.write("A4", "Total Hours", label_fmt)
         summary_sheet.write_number("B4", summary["Total Hours"], summary_hours_fmt)
+        summary_sheet.write("A5", "Sum of employee total hours", label_fmt)
+        summary_sheet.write_number("B5", summary["Sum Employee Total Hours"], summary_hours_fmt)
 
-        summary_sheet.set_column("A:A", 24)
+        summary_sheet.set_column("A:A", 32)
         summary_sheet.set_column("B:B", 16)
 
-        # Add a dedicated 'Employee Weeks' tab
-        weeks_sheet = writer.book.add_worksheet("Employee Weeks")
-        weeks_header_fmt = writer.book.add_format({"bold": True, "bg_color": "#1F4E78", "font_color": "white", "align": "center", "border": 1})
-        weeks_label_fmt = writer.book.add_format({"border": 1})
-        weeks_value_fmt = writer.book.add_format({"border": 1, "num_format": "0"})
+        ehs_name = "Employee Hours Summary"
+        ehs_header_fmt = writer.book.add_format(
+            {"bold": True, "bg_color": "#1F4E78", "font_color": "white", "align": "center", "border": 1}
+        )
+        ehs_text_fmt = writer.book.add_format({"border": 1})
+        ehs_hours_fmt = writer.book.add_format({"border": 1, "num_format": "0.00"})
+        ehs_total_fmt = writer.book.add_format({"bold": True, "border": 1, "num_format": "0.00"})
 
-        weeks_sheet.write(0, 0, "Employee", weeks_header_fmt)
-        weeks_sheet.write(0, 1, "Total Weeks", weeks_header_fmt)
-        for idx, (emp, weeks) in enumerate(summary["Employee Weeks"].items(), start=1):
-            weeks_sheet.write(idx, 0, emp, weeks_label_fmt)
-            weeks_sheet.write_number(idx, 1, weeks, weeks_value_fmt)
-        weeks_sheet.set_column("A:A", 34)
-        weeks_sheet.set_column("B:B", 16)
+        ehs_sheet = writer.book.add_worksheet(ehs_name)
+        if len(employee_hours_df):
+            ehs_cols = list(employee_hours_df.columns)
+            for col_idx, column_name in enumerate(ehs_cols):
+                ehs_sheet.write(0, col_idx, column_name, ehs_header_fmt)
+            for row_idx, (_, erow) in enumerate(employee_hours_df.iterrows(), start=1):
+                for col_idx, column_name in enumerate(ehs_cols):
+                    val = erow[column_name]
+                    is_hours_col = column_name not in ("employee_name", "employee_id")
+                    fmt = ehs_total_fmt if column_name == "total_hours" else ehs_hours_fmt if is_hours_col else ehs_text_fmt
+                    if isinstance(val, (int, float)) and not isinstance(val, bool):
+                        ehs_sheet.write_number(row_idx, col_idx, float(val), fmt)
+                    else:
+                        ehs_sheet.write(row_idx, col_idx, val if pd.notna(val) else "", fmt)
+            ncols = len(ehs_cols)
+            ehs_sheet.set_column(0, 1, 28)
+            if ncols > 2:
+                ehs_sheet.set_column(2, ncols - 2, 14)
+            if ncols > 0:
+                ehs_sheet.set_column(ncols - 1, ncols - 1, 16)
+            ehs_sheet.freeze_panes(1, 0)
+            ehs_sheet.autofilter(0, 0, len(employee_hours_df), ncols - 1)
+        else:
+            ehs_sheet.write(0, 0, "employee_name", ehs_header_fmt)
+            ehs_sheet.write(0, 1, "employee_id", ehs_header_fmt)
+            ehs_sheet.write(0, 2, "total_hours", ehs_header_fmt)
     excel_stream.seek(0)
 
     return output, excel_stream
+
+
+def filter_timesheet_fact_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Return only data rows from a Timesheet export (exclude embedded total rows)."""
+    if df.empty or "Employee" not in df.columns:
+        return df
+    emp_col = df["Employee"].astype(str)
+    mask = ~(
+        emp_col.str.contains("Grand Total", case=False, na=False)
+        | (emp_col.str.strip() == "OVERALL GRAND TOTAL")
+    )
+    return df.loc[mask].copy()

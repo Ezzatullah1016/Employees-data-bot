@@ -8,7 +8,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from .forms import TimesheetUploadForm
 from .models import ProcessedTimesheet
-from .services import process_timesheet
+from .services import filter_timesheet_fact_rows, process_timesheet
 
 
 @require_http_methods(["GET", "POST"])
@@ -57,7 +57,8 @@ def upload_timesheet(request):
         processed = get_object_or_404(ProcessedTimesheet, pk=processed_id)
         if processed.status == ProcessedTimesheet.Status.SUCCESS and processed.output_file:
             with processed.output_file.open("rb") as result_file:
-                output_df = pd.read_excel(result_file)
+                output_df = pd.read_excel(result_file, sheet_name="Timesheet")
+            output_df = filter_timesheet_fact_rows(output_df)
             preview_df = output_df.rename(
                 columns={
                     "Service Date": "service_date",
@@ -129,6 +130,7 @@ def process_timesheet_api(request):
         record.error_message = ""
         record.save()
 
+        output_df = filter_timesheet_fact_rows(output_df)
         preview_df = output_df.rename(
             columns={
                 "Service Date": "service_date",
