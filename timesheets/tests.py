@@ -208,6 +208,30 @@ class ProcessTimesheetTests(SimpleTestCase):
         self.assertEqual(summary_df.iloc[0]["employee_name"], "Doe, Jane")
         self.assertEqual(summary_df.iloc[0]["employee_id"], "PV1")
 
+    def test_employee_hours_summary_uses_source_employee_column_when_present(self):
+        source = pd.DataFrame(
+            [
+                {
+                    "Employee": "Display From Payroll",
+                    "First Name": "Jane",
+                    "Last Name": "Doe",
+                    "Service Date": "2026-01-06",
+                    "Actual Time In": "08:00 AM",
+                    "Actual Time Out": "10:00 AM",
+                },
+            ]
+        )
+        input_stream = BytesIO(source.to_csv(index=False).encode("utf-8"))
+
+        _, excel_buf = process_timesheet(input_stream, filename="input.csv")
+        summary_df = pd.read_excel(excel_buf, sheet_name="Employee Hours Summary")
+        self.assertEqual(summary_df.iloc[0]["employee_name"], "Display From Payroll")
+        eid = summary_df.iloc[0]["employee_id"]
+        self.assertTrue(
+            eid == "" or (isinstance(eid, float) and pd.isna(eid)) or pd.isna(eid),
+            msg="empty id should be blank; pandas often reads that as NaN from xlsx",
+        )
+
     def test_filter_timesheet_fact_rows_excludes_totals(self):
         frame = pd.DataFrame(
             {

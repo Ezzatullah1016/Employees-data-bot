@@ -13,10 +13,27 @@ REQUIRED_COLUMNS = [
     "Actual Time In",
     "Actual Time Out",
 ]
-OPTIONAL_COLUMNS = ["Identifier", "Service Code", "Service Description", "Earnings Code", "Pay Units"]
+OPTIONAL_COLUMNS = [
+    "Identifier",
+    "Employee Name",
+    "Service Code",
+    "Service Description",
+    "Earnings Code",
+    "Pay Units",
+]
 
 HEADER_ALIASES = {
     "Identifier": {"identifier", "employee id", "staff id", "clinician id"},
+    "Employee Name": {
+        "employee name",
+        "employee",
+        "employee_name",
+        "resource",
+        "resource name",
+        "clinician name",
+        "caregiver",
+        "caregiver name",
+    },
     "First Name": {"first name", "firstname", "first"},
     "Last Name": {"last name", "lastname", "last"},
     "Service Date": {"service date", "date of service", "dos", "date"},
@@ -36,6 +53,14 @@ def _split_employee_label(label: str) -> tuple[str, str]:
     if m:
         return m.group(1).strip(), m.group(2).strip()
     return str(label).strip(), ""
+
+
+def _first_non_empty_in_group(values: pd.Series) -> str:
+    for v in values:
+        s = str(v).strip()
+        if s and s.lower() != "nan":
+            return s
+    return ""
 
 
 def _iso_week_column_label(service_date) -> pd.Series:
@@ -163,6 +188,12 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
     else:
         df["Pay Units"] = pd.NA
 
+    if "Employee Name" in df.columns:
+        df["Employee Name"] = df["Employee Name"].astype(str).str.strip()
+        df["Employee Name"] = df["Employee Name"].replace({"nan": ""})
+    else:
+        df["Employee Name"] = ""
+
     df["Employee"] = df["Last Name"] + ", " + df["First Name"]
     df["Employee Label"] = df["Employee"]
     identifier_mask = df["Identifier"].ne("")
@@ -216,6 +247,21 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
     grouped["Total Hours Worked"] = grouped["Visit Span Hours"] + grouped["Call_Hours_Added"]
     grouped = grouped.sort_values(["Employee", "Service Date"])
 
+    name_lookup = (
+        df.groupby(["Employee", "Identifier", "Employee Label"], sort=False)["Employee Name"]
+        .agg(_first_non_empty_in_group)
+        .reset_index(name="Employee_Name_From_File")
+    )
+    grouped = grouped.merge(
+        name_lookup,
+        on=["Employee", "Identifier", "Employee Label"],
+        how="left",
+    )
+    grouped["Employee_Name_From_File"] = (
+        grouped["Employee_Name_From_File"].fillna("").astype(str).str.strip()
+    )
+    grouped["Employee_Name_From_File"] = grouped["Employee_Name_From_File"].replace({"nan": ""})
+
     grouped["Week_Column"] = _iso_week_column_label(grouped["Service Date"])
     weekly_by_label = (
         grouped.groupby(["Employee Label", "Week_Column"], sort=False)["Total Hours Worked"]
@@ -235,11 +281,31 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
     hours_pivot = hours_pivot.reindex(label_order).fillna(0.0)
     hours_per_label = grouped.groupby("Employee Label", sort=False)["Total Hours Worked"].sum()
 
+    label_meta = grouped.groupby("Employee Label", sort=False).agg(
+        employee_id=("Identifier", "first"),
+        name_from_file=("Employee_Name_From_File", "first"),
+    )
+
     employee_hours_rows: list[dict[str, str | float]] = []
     for label in label_order:
         if label not in hours_pivot.index:
             continue
-        emp_name, emp_id = _split_employee_label(label)
+        name_from_file = str(label_meta.at[label, "name_from_file"]).strip()
+        if name_from_file and name_from_file.lower() != "nan":
+            emp_name = name_from_file
+        else:
+            emp_name, _ = _split_employee_label(label)
+        raw_id = label_meta.at[label, "employee_id"]
+        if raw_id is None or (isinstance(raw_id, float) and pd.isna(raw_id)):
+            rid = ""
+        else:
+            rid = str(raw_id).strip()
+        if not rid or rid.lower() == "nan":
+            _, emp_id = _split_employee_label(label)
+        else:
+            emp_id = rid
+        if not emp_id or str(emp_id).lower() == "nan":
+            emp_id = ""
         row: dict[str, str | float] = {"employee_name": emp_name, "employee_id": emp_id}
         for wc in week_columns:
             row[wc] = round(float(hours_pivot.loc[label, wc]), 2)
@@ -247,6 +313,14 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
         employee_hours_rows.append(row)
 
     employee_hours_df = pd.DataFrame(employee_hours_rows)
+    if len(employee_hours_df):
+        employee_hours_df["employee_name"] = employee_hours_df["employee_name"].fillna("").astype(str)
+        employee_hours_df["employee_id"] = employee_hours_df["employee_id"].fillna("").astype(str)
+        employee_hours_df.loc[
+            employee_hours_df["employee_id"].str.strip().str.lower().isin(["nan", "none"]),
+            "employee_id",
+        ] = ""
+
     detail_hours_total = round(float(grouped["Total Hours Worked"].sum()), 2)
     summary_hours_total = round(float(employee_hours_df["total_hours"].sum()), 2) if len(employee_hours_df) else 0.0
     if employee_hours_rows and summary_hours_total != detail_hours_total:
@@ -386,7 +460,7 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
         ehs_header_fmt = writer.book.add_format(
             {"bold": True, "bg_color": "#1F4E78", "font_color": "white", "align": "center", "border": 1}
         )
-        ehs_text_fmt = writer.book.add_format({"border": 1})
+        ehs_text_fmt = writer.book.add_format({"border": 1, "num_format": "@"})
         ehs_hours_fmt = writer.book.add_format({"border": 1, "num_format": "0.00"})
         ehs_total_fmt = writer.book.add_format({"bold": True, "border": 1, "num_format": "0.00"})
 
@@ -400,7 +474,12 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
                     val = erow[column_name]
                     is_hours_col = column_name not in ("employee_name", "employee_id")
                     fmt = ehs_total_fmt if column_name == "total_hours" else ehs_hours_fmt if is_hours_col else ehs_text_fmt
-                    if isinstance(val, (int, float)) and not isinstance(val, bool):
+                    if column_name in ("employee_name", "employee_id"):
+                        text = "" if pd.isna(val) else str(val).strip()
+                        if text.lower() == "nan":
+                            text = ""
+                        ehs_sheet.write_string(row_idx, col_idx, text, ehs_text_fmt)
+                    elif isinstance(val, (int, float)) and not isinstance(val, bool) and pd.notna(val):
                         ehs_sheet.write_number(row_idx, col_idx, float(val), fmt)
                     else:
                         ehs_sheet.write(row_idx, col_idx, val if pd.notna(val) else "", fmt)
