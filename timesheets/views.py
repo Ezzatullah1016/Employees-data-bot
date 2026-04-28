@@ -1,3 +1,5 @@
+from io import BytesIO
+
 import pandas as pd
 from django.contrib import messages
 from django.core.files.base import ContentFile
@@ -11,6 +13,17 @@ from .models import ProcessedTimesheet
 from .services import filter_timesheet_fact_rows, process_timesheet
 
 
+def _snapshot_upload(uploaded):
+    """Return a stable bytes snapshot and filename for re-usable processing."""
+    upload_name = uploaded.name
+    try:
+        uploaded.seek(0)
+    except Exception:
+        pass
+    payload = uploaded.read()
+    return upload_name, payload
+
+
 @require_http_methods(["GET", "POST"])
 def upload_timesheet(request):
     form = TimesheetUploadForm(request.POST or None, request.FILES or None)
@@ -21,20 +34,17 @@ def upload_timesheet(request):
 
     if request.method == "POST" and form.is_valid():
         uploaded_file = form.cleaned_data["file"]
+        upload_name, upload_bytes = _snapshot_upload(uploaded_file)
 
         # Remove any old ProcessedTimesheet with the same file name (avoid caching issues)
-        ProcessedTimesheet.objects.filter(source_file=f"uploads/{uploaded_file.name}").delete()
+        ProcessedTimesheet.objects.filter(source_file=f"uploads/{upload_name}").delete()
 
         record = ProcessedTimesheet.objects.create(
-            source_file=uploaded_file,
             status=ProcessedTimesheet.Status.FAILED,
         )
+        record.source_file.save(upload_name, ContentFile(upload_bytes), save=False)
         try:
-            try:
-                uploaded_file.seek(0)
-            except Exception:
-                pass
-            output_df, output_stream = process_timesheet(uploaded_file, filename=uploaded_file.name)
+            output_df, output_stream = process_timesheet(BytesIO(upload_bytes), filename=upload_name)
             record.output_file.save(
                 f"timesheet_{record.id}.xlsx",
                 ContentFile(output_stream.getvalue()),
@@ -110,17 +120,14 @@ def process_timesheet_api(request):
     uploaded = request.FILES.get("file")
     if not uploaded:
         return JsonResponse({"ok": False, "error": "Please upload a file."}, status=400)
+    upload_name, upload_bytes = _snapshot_upload(uploaded)
 
     record = ProcessedTimesheet.objects.create(
-        source_file=uploaded,
         status=ProcessedTimesheet.Status.FAILED,
     )
+    record.source_file.save(upload_name, ContentFile(upload_bytes), save=False)
     try:
-        try:
-            uploaded.seek(0)
-        except Exception:
-            pass
-        output_df, output_stream = process_timesheet(uploaded, filename=uploaded.name)
+        output_df, output_stream = process_timesheet(BytesIO(upload_bytes), filename=upload_name)
         record.output_file.save(
             f"timesheet_{record.id}.xlsx",
             ContentFile(output_stream.getvalue()),

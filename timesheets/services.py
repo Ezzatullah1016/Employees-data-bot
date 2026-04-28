@@ -321,9 +321,14 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
             "employee_id",
         ] = ""
 
-    detail_hours_total = round(float(grouped["Total Hours Worked"].sum()), 2)
-    summary_hours_total = round(float(employee_hours_df["total_hours"].sum()), 2) if len(employee_hours_df) else 0.0
-    if employee_hours_rows and summary_hours_total != detail_hours_total:
+    detail_hours_raw_total = float(grouped["Total Hours Worked"].sum())
+    summary_hours_raw_total = float(hours_per_label.sum()) if len(employee_hours_rows) else 0.0
+    detail_hours_total = round(float(grouped["Total Hours Worked"].round(2).sum()), 2)
+    summary_hours_total = (
+        round(float(employee_hours_df["total_hours"].sum()), 2) if len(employee_hours_df) else 0.0
+    )
+    # Allow minor floating-point and per-row rounding drift on large exports.
+    if employee_hours_rows and abs(summary_hours_raw_total - detail_hours_raw_total) > 0.011:
         raise ValueError(
             "Internal validation failed: employee hours summary does not match timesheet detail totals."
         )

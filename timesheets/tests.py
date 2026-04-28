@@ -242,3 +242,32 @@ class ProcessTimesheetTests(SimpleTestCase):
         filtered = filter_timesheet_fact_rows(frame)
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered.iloc[0]["Employee"], "Doe, Jane")
+
+    def test_large_export_style_rounding_drift_does_not_fail_validation(self):
+        source = pd.DataFrame(
+            [
+                {
+                    "First Name": "Jane",
+                    "Last Name": "Doe",
+                    "Service Date": "2026-01-06",
+                    "Actual Time In": "08:00 AM",
+                    "Actual Time Out": "08:01 AM",
+                },
+                {
+                    "First Name": "John",
+                    "Last Name": "Smith",
+                    "Service Date": "2026-01-06",
+                    "Actual Time In": "08:00 AM",
+                    "Actual Time Out": "08:01 AM",
+                },
+            ]
+        )
+        input_stream = BytesIO(source.to_csv(index=False).encode("utf-8"))
+
+        output_df, excel_buf = process_timesheet(input_stream, filename="rounding.csv")
+
+        self.assertEqual(len(output_df), 2)
+        detail_total = round(float(output_df["Total Hours Worked"].sum()), 2)
+        summary_df = pd.read_excel(excel_buf, sheet_name="Summary")
+        summary_total = float(summary_df.loc[summary_df["Metric"] == "Sum of employee total hours", "Value"].iloc[0])
+        self.assertEqual(summary_total, detail_total)
