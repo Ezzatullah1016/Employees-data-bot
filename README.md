@@ -12,6 +12,7 @@ This app uploads healthcare visit sheets (CSV/Excel), groups rows by employee an
   - `Actual Time In`
   - `Actual Time Out`
 - Optional: any of `Employee`, `Employee Name`, `employee_name`, etc. (see `HEADER_ALIASES` in `timesheets/services.py`) — if present, that text is used as `employee_name` on the **Employee Hours Summary** sheet instead of rebuilding `Last, First` from the name fields. **Weekly and total hours are always computed from your visit times and dates**, not taken from sample or placeholder data.
+- **Employee Hours Summary** week columns use a **Sunday–Saturday** work week. Each column header is the **Sunday date** that starts that week (`YYYY-MM-DD`), e.g. work on Mon 4/20/2026 through Sat 4/25/2026 rolls into the week labeled **2026-04-19**; Mon 4/27/2026 falls in the next week (**2026-04-26**).
 - Uses `pandas` to:
   - clean null/missing values
   - parse AM/PM time values

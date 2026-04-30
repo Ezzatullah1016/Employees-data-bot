@@ -63,19 +63,22 @@ def _first_non_empty_in_group(values: pd.Series) -> str:
     return ""
 
 
-def _iso_week_column_label(service_date) -> pd.Series:
-    ts = pd.to_datetime(service_date)
-    cal = ts.dt.isocalendar()
-    return (
-        cal["year"].astype("int64").astype(str)
-        + "-W"
-        + cal["week"].astype("int64").astype(str).str.zfill(2)
-    )
+def _sunday_week_column_label(service_date) -> pd.Series:
+    """Label each row with the Sunday date (YYYY-MM-DD) that starts its work week (Sun–Sat)."""
+    ts = pd.to_datetime(service_date).dt.normalize()
+    # pandas: Monday=0 … Sunday=6. Days to subtract to reach the Sunday that begins this week.
+    offset = (ts.dt.weekday + 1) % 7
+    week_start = ts - pd.to_timedelta(offset, unit="D")
+    return week_start.dt.strftime("%Y-%m-%d")
 
 
-def _parse_iso_week_column(label: str) -> tuple[int, int]:
-    year_s, week_s = str(label).split("-W", 1)
-    return int(year_s), int(week_s)
+def _parse_sunday_week_column(label: str) -> tuple[int, int, int]:
+    """Sort key for week columns stored as Sunday dates YYYY-MM-DD."""
+    try:
+        d = pd.Timestamp(str(label).strip())
+        return (int(d.year), int(d.month), int(d.day))
+    except Exception:
+        return (0, 0, 0)
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -262,7 +265,7 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
     )
     grouped["Employee_Name_From_File"] = grouped["Employee_Name_From_File"].replace({"nan": ""})
 
-    grouped["Week_Column"] = _iso_week_column_label(grouped["Service Date"])
+    grouped["Week_Column"] = _sunday_week_column_label(grouped["Service Date"])
     weekly_by_label = (
         grouped.groupby(["Employee Label", "Week_Column"], sort=False)["Total Hours Worked"]
         .sum()
@@ -275,7 +278,7 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
         aggfunc="sum",
         fill_value=0.0,
     )
-    week_columns = sorted(hours_pivot.columns, key=_parse_iso_week_column)
+    week_columns = sorted(hours_pivot.columns, key=_parse_sunday_week_column)
     hours_pivot = hours_pivot.reindex(columns=week_columns, fill_value=0.0)
     label_order = grouped["Employee Label"].drop_duplicates().tolist()
     hours_pivot = hours_pivot.reindex(label_order).fillna(0.0)

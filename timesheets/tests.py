@@ -174,10 +174,11 @@ class ProcessTimesheetTests(SimpleTestCase):
         detail_sum = round(float(output_df["Total Hours Worked"].sum()), 2)
         summary_df = pd.read_excel(excel_buf, sheet_name="Employee Hours Summary")
         self.assertEqual(round(float(summary_df.iloc[0]["total_hours"]), 2), detail_sum)
-        self.assertIn("2026-W02", summary_df.columns)
-        self.assertIn("2026-W03", summary_df.columns)
-        self.assertEqual(float(summary_df.iloc[0]["2026-W02"]), 4.0)
-        self.assertEqual(float(summary_df.iloc[0]["2026-W03"]), 4.0)
+        # Sun–Sat weeks: 2026-01-06 (Tue) → week starting Sun 2026-01-04; 2026-01-13 → Sun 2026-01-11
+        self.assertIn("2026-01-04", summary_df.columns)
+        self.assertIn("2026-01-11", summary_df.columns)
+        self.assertEqual(float(summary_df.iloc[0]["2026-01-04"]), 4.0)
+        self.assertEqual(float(summary_df.iloc[0]["2026-01-11"]), 4.0)
 
         kpi = pd.read_excel(excel_buf, sheet_name="Summary")
         self.assertEqual(float(kpi.loc[kpi["Metric"] == "Total Hours", "Value"].iloc[0]), detail_sum)
@@ -207,6 +208,41 @@ class ProcessTimesheetTests(SimpleTestCase):
         summary_df = pd.read_excel(excel_buf, sheet_name="Employee Hours Summary")
         self.assertEqual(summary_df.iloc[0]["employee_name"], "Doe, Jane")
         self.assertEqual(summary_df.iloc[0]["employee_id"], "PV1")
+
+    def test_sunday_saturday_week_splits_monday_after_prior_saturday(self):
+        """Apr 20–24 (Mon–Fri) in week Sun 4/19–Sat 4/25; Apr 27 (Mon) in next week Sun 4/26."""
+        rows = []
+        for d in ("2026-04-20", "2026-04-21", "2026-04-22", "2026-04-23", "2026-04-24"):
+            rows.append(
+                {
+                    "Identifier": "NW8043",
+                    "First Name": "Leah",
+                    "Last Name": "Cheplick",
+                    "Service Date": d,
+                    "Actual Time In": "09:00 AM",
+                    "Actual Time Out": "05:00 PM",
+                }
+            )
+        rows.append(
+            {
+                "Identifier": "NW8043",
+                "First Name": "Leah",
+                "Last Name": "Cheplick",
+                "Service Date": "2026-04-27",
+                "Actual Time In": "09:00 AM",
+                "Actual Time Out": "05:00 PM",
+            }
+        )
+        buf = BytesIO()
+        pd.DataFrame(rows).to_csv(buf, index=False)
+        buf.seek(0)
+        _, excel_buf = process_timesheet(buf, filename="weeks.csv")
+        summary_df = pd.read_excel(excel_buf, sheet_name="Employee Hours Summary")
+        self.assertIn("2026-04-19", summary_df.columns)
+        self.assertIn("2026-04-26", summary_df.columns)
+        self.assertEqual(float(summary_df.iloc[0]["2026-04-19"]), 40.0)
+        self.assertEqual(float(summary_df.iloc[0]["2026-04-26"]), 8.0)
+        self.assertEqual(float(summary_df.iloc[0]["total_hours"]), 48.0)
 
     def test_employee_hours_summary_uses_source_employee_column_when_present(self):
         source = pd.DataFrame(
