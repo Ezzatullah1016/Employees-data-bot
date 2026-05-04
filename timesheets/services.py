@@ -20,6 +20,7 @@ OPTIONAL_COLUMNS = [
     "Service Description",
     "Earnings Code",
     "Pay Units",
+    "Travel Miles",
 ]
 
 HEADER_ALIASES = {
@@ -34,15 +35,41 @@ HEADER_ALIASES = {
         "caregiver",
         "caregiver name",
     },
-    "First Name": {"first name", "firstname", "first"},
-    "Last Name": {"last name", "lastname", "last"},
-    "Service Date": {"service date", "date of service", "dos", "date"},
-    "Actual Time In": {"actual time in", "time in", "start time", "clock in", "in time"},
-    "Actual Time Out": {"actual time out", "time out", "end time", "clock out", "out time"},
+    "First Name": {"first name", "firstname", "first", "given name", "f name", "fname"},
+    "Last Name": {"last name", "lastname", "last", "surname", "family name", "l name", "lname"},
+    "Service Date": {
+        "service date",
+        "date of service",
+        "dos",
+        "date",
+        "svc date",
+        "visit date",
+        "appointment date",
+        "date of svc",
+    },
+    "Actual Time In": {
+        "actual time in",
+        "time in",
+        "start time",
+        "clock in",
+        "in time",
+        "clock-in",
+        "time-in",
+    },
+    "Actual Time Out": {
+        "actual time out",
+        "time out",
+        "end time",
+        "clock out",
+        "out time",
+        "clock-out",
+        "time-out",
+    },
     "Service Code": {"service code", "svc code"},
     "Service Description": {"service description", "service desc", "description"},
     "Earnings Code": {"earnings code", "earning code"},
     "Pay Units": {"pay units", "units"},
+    "Travel Miles": {"travel miles", "miles", "mileage", "travel mileage"},
 }
 CALL_PAY_CODES = {"PATPC"}
 _EMPLOYEE_LABEL_ID = re.compile(r"^(.*) \(([^)]+)\)$")
@@ -82,7 +109,7 @@ def _parse_sunday_week_column(label: str) -> tuple[int, int, int]:
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df.columns = [str(col).strip() for col in df.columns]
+    df.columns = [str(col).strip().lstrip("\ufeff") for col in df.columns]
     return df
 
 
@@ -101,17 +128,45 @@ def _canonicalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     renamed = df.rename(columns=mapping)
     missing = [col for col in REQUIRED_COLUMNS if col not in renamed.columns]
     if missing:
+        seen = [str(c) for c in renamed.columns[:35]]
+        suffix = " …" if len(renamed.columns) > 35 else ""
         raise ValueError(
-            "Missing required columns: First Name, Last Name, Service Date, Actual Time In, Actual Time Out"
+            "Could not find these required columns: "
+            + ", ".join(missing)
+            + ". Columns detected in the file: "
+            + ", ".join(seen)
+            + suffix
+            + ". Save as CSV UTF-8 or Excel with a header row that includes first/last name, service date, and clock in/out."
         )
     return renamed
+
+
+def _read_csv_bytes(raw_bytes: bytes) -> pd.DataFrame:
+    """Read CSV/TSV bytes with UTF-8 BOM and Windows encodings; retry tab if sniffer yields a single column."""
+    last_decode_error: UnicodeDecodeError | None = None
+    for encoding in ("utf-8-sig", "utf-8", "cp1252"):
+        try:
+            header_line = raw_bytes.split(b"\n", 1)[0].decode(encoding, errors="strict")
+        except UnicodeDecodeError as exc:
+            last_decode_error = exc
+            continue
+        bio = BytesIO(raw_bytes)
+        df = pd.read_csv(bio, sep=None, engine="python", dtype_backend="numpy_nullable", encoding=encoding)
+        if len(df.columns) <= 1 and "\t" in header_line and header_line.count("\t") >= 3:
+            bio = BytesIO(raw_bytes)
+            df = pd.read_csv(bio, sep="\t", dtype_backend="numpy_nullable", encoding=encoding)
+        return df
+    raise last_decode_error or UnicodeDecodeError("utf-8", b"", 0, 1, "Unable to decode file")
 
 
 def _read_source_file(file_obj, filename: str) -> pd.DataFrame:
     extension = Path(filename).suffix.lower()
     if extension == ".csv":
-        return pd.read_csv(file_obj, sep=None, engine="python", dtype_backend="numpy_nullable")
+        file_obj.seek(0)
+        raw_bytes = file_obj.read()
+        return _read_csv_bytes(raw_bytes)
     if extension in {".xlsx", ".xls"}:
+        file_obj.seek(0)
         return pd.read_excel(file_obj, dtype_backend="numpy_nullable")
     raise ValueError("Unsupported file format. Please upload .xlsx, .xls, or .csv.")
 
@@ -191,6 +246,11 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
     else:
         df["Pay Units"] = pd.NA
 
+    if "Travel Miles" in df.columns:
+        df["Travel Miles"] = pd.to_numeric(df["Travel Miles"], errors="coerce").fillna(0.0)
+    else:
+        df["Travel Miles"] = 0.0
+
     if "Employee Name" in df.columns:
         df["Employee Name"] = df["Employee Name"].astype(str).str.strip()
         df["Employee Name"] = df["Employee Name"].replace({"nan": ""})
@@ -243,6 +303,16 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
         how="outer",
     )
     grouped["Call_Hours_Added"] = grouped["Call_Hours_Added"].fillna(0.0)
+    miles_by_day = (
+        df.groupby(["Employee", "Identifier", "Employee Label", "Service Date"], as_index=False)
+        .agg(Travel_Miles_Total=("Travel Miles", "sum"))
+    )
+    grouped = grouped.merge(
+        miles_by_day,
+        on=["Employee", "Identifier", "Employee Label", "Service Date"],
+        how="left",
+    )
+    grouped["Travel_Miles_Total"] = grouped["Travel_Miles_Total"].fillna(0.0)
     grouped["Visit Span Hours"] = (
         grouped["Latest_Time_Out"] - grouped["Earliest_Time_In"]
     ).dt.total_seconds() / 3600
@@ -270,6 +340,9 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
         grouped.groupby(["Employee Label", "Week_Column"], sort=False)["Total Hours Worked"]
         .sum()
         .reset_index()
+    )
+    weekly_by_label["Total Hours Worked"] = (
+        pd.to_numeric(weekly_by_label["Total Hours Worked"], errors="coerce").fillna(0.0).astype("float64")
     )
     hours_pivot = weekly_by_label.pivot_table(
         index="Employee Label",
@@ -315,6 +388,60 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
         row["total_hours"] = round(float(hours_per_label.loc[label]), 2)
         employee_hours_rows.append(row)
 
+    weekly_miles_by_label = (
+        grouped.groupby(["Employee Label", "Week_Column"], sort=False)["Travel_Miles_Total"]
+        .sum()
+        .reset_index()
+    )
+    weekly_miles_by_label["Travel_Miles_Total"] = (
+        pd.to_numeric(weekly_miles_by_label["Travel_Miles_Total"], errors="coerce").fillna(0.0).astype("float64")
+    )
+    miles_pivot = weekly_miles_by_label.pivot_table(
+        index="Employee Label",
+        columns="Week_Column",
+        values="Travel_Miles_Total",
+        aggfunc="sum",
+        fill_value=0.0,
+    )
+    miles_pivot = miles_pivot.reindex(columns=week_columns, fill_value=0.0)
+    miles_pivot = miles_pivot.reindex(label_order).fillna(0.0)
+    miles_per_label = grouped.groupby("Employee Label", sort=False)["Travel_Miles_Total"].sum()
+
+    travel_miles_rows: list[dict[str, str | float]] = []
+    for label in label_order:
+        if label not in miles_pivot.index:
+            continue
+        name_from_file = str(label_meta.at[label, "name_from_file"]).strip()
+        if name_from_file and name_from_file.lower() != "nan":
+            emp_name = name_from_file
+        else:
+            emp_name, _ = _split_employee_label(label)
+        raw_id = label_meta.at[label, "employee_id"]
+        if raw_id is None or (isinstance(raw_id, float) and pd.isna(raw_id)):
+            rid = ""
+        else:
+            rid = str(raw_id).strip()
+        if not rid or rid.lower() == "nan":
+            _, emp_id = _split_employee_label(label)
+        else:
+            emp_id = rid
+        if not emp_id or str(emp_id).lower() == "nan":
+            emp_id = ""
+        tm_row: dict[str, str | float] = {"employee_name": emp_name, "employee_id": emp_id}
+        for wc in week_columns:
+            tm_row[wc] = round(float(miles_pivot.loc[label, wc]), 2)
+        tm_row["total_miles"] = round(float(miles_per_label.loc[label]), 2)
+        travel_miles_rows.append(tm_row)
+
+    travel_miles_df = pd.DataFrame(travel_miles_rows)
+    if len(travel_miles_df):
+        travel_miles_df["employee_name"] = travel_miles_df["employee_name"].fillna("").astype(str)
+        travel_miles_df["employee_id"] = travel_miles_df["employee_id"].fillna("").astype(str)
+        travel_miles_df.loc[
+            travel_miles_df["employee_id"].str.strip().str.lower().isin(["nan", "none"]),
+            "employee_id",
+        ] = ""
+
     employee_hours_df = pd.DataFrame(employee_hours_rows)
     if len(employee_hours_df):
         employee_hours_df["employee_name"] = employee_hours_df["employee_name"].fillna("").astype(str)
@@ -342,16 +469,20 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
             "Service Date": pd.to_datetime(grouped["Service Date"]).dt.strftime("%m/%d/%Y"),
             "Earliest Actual Time In": grouped["Earliest_Time_In"].dt.strftime("%I:%M %p").fillna(""),
             "Latest Actual Time Out": grouped["Latest_Time_Out"].dt.strftime("%I:%M %p").fillna(""),
+            "Total Travel Miles": grouped["Travel_Miles_Total"].round(2),
             "Call Hours Added": grouped["Call_Hours_Added"].round(2),
             "Total Hours Worked": grouped["Total Hours Worked"].round(2),
         }
     )
+
+    total_travel_miles = round(float(grouped["Travel_Miles_Total"].sum()), 2)
 
     summary = {
         "Employees": int(grouped["Employee"].nunique()),
         "Employee-Day Records": int(len(output)),
         "Total Hours": detail_hours_total,
         "Sum Employee Total Hours": summary_hours_total,
+        "Total Travel Miles": total_travel_miles,
     }
 
     # Build a printable report with per-employee totals and a final grand total row.
@@ -373,6 +504,7 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
                         if pd.notna(row["Latest_Time_Out"])
                         else ""
                     ),
+                    "Total Travel Miles": round(float(row["Travel_Miles_Total"]), 2),
                     "Call Hours Added": round(float(row["Call_Hours_Added"]), 2),
                     "Total Hours Worked": round(float(row["Total Hours Worked"]), 2),
                 }
@@ -383,6 +515,10 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
                 "Service Date": "",
                 "Earliest Actual Time In": "",
                 "Latest Actual Time Out": "",
+                "Total Travel Miles": round(
+                    float(grouped.loc[grouped["Employee"] == employee_key, "Travel_Miles_Total"].sum()),
+                    2,
+                ),
                 "Call Hours Added": round(
                     float(grouped.loc[grouped["Employee"] == employee_key, "Call_Hours_Added"].sum()),
                     2,
@@ -400,6 +536,7 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
             "Service Date": "",
             "Earliest Actual Time In": "",
             "Latest Actual Time Out": "",
+            "Total Travel Miles": total_travel_miles,
             "Call Hours Added": round(float(grouped["Call_Hours_Added"].sum()), 2),
             "Total Hours Worked": summary["Total Hours"],
         }
@@ -422,6 +559,7 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
         total_hours_fmt = book.add_format({"bold": True, "bg_color": "#E2F0D9", "border": 1, "num_format": "0.00"})
         grand_hours_fmt = book.add_format({"bold": True, "bg_color": "#FFE699", "border": 1, "num_format": "0.00"})
 
+        numeric_timesheet_cols = {"Total Travel Miles", "Call Hours Added", "Total Hours Worked"}
         for col_idx, column_name in enumerate(formatted_output.columns):
             sheet.write(0, col_idx, column_name, header_fmt)
 
@@ -430,17 +568,16 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
             is_employee_total = str(row["Employee"]).startswith("Grand Total (")
             base_fmt = grand_total_fmt if is_overall_total else total_row_fmt if is_employee_total else data_fmt
             hour_cell_fmt = grand_hours_fmt if is_overall_total else total_hours_fmt if is_employee_total else hours_fmt
-
-            sheet.write(row_idx, 0, row["Employee"], base_fmt)
-            sheet.write(row_idx, 1, row["Service Date"], base_fmt)
-            sheet.write(row_idx, 2, row["Earliest Actual Time In"], base_fmt)
-            sheet.write(row_idx, 3, row["Latest Actual Time Out"], base_fmt)
-            sheet.write_number(row_idx, 4, float(row["Call Hours Added"]), hour_cell_fmt)
-            sheet.write_number(row_idx, 5, float(row["Total Hours Worked"]), hour_cell_fmt)
+            for col_idx, column_name in enumerate(formatted_output.columns):
+                val = row[column_name]
+                if column_name in numeric_timesheet_cols:
+                    sheet.write_number(row_idx, col_idx, float(val), hour_cell_fmt)
+                else:
+                    sheet.write(row_idx, col_idx, val, base_fmt)
 
         sheet.set_column("A:A", 34)
         sheet.set_column("B:D", 20)
-        sheet.set_column("E:F", 20)
+        sheet.set_column("E:G", 18)
         sheet.freeze_panes(1, 0)
         sheet.autofilter(0, 0, len(report_rows), len(formatted_output.columns) - 1)
 
@@ -460,6 +597,8 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
         summary_sheet.write_number("B4", summary["Total Hours"], summary_hours_fmt)
         summary_sheet.write("A5", "Sum of employee total hours", label_fmt)
         summary_sheet.write_number("B5", summary["Sum Employee Total Hours"], summary_hours_fmt)
+        summary_sheet.write("A6", "Total travel miles", label_fmt)
+        summary_sheet.write_number("B6", summary["Total Travel Miles"], summary_hours_fmt)
 
         summary_sheet.set_column("A:A", 32)
         summary_sheet.set_column("B:B", 16)
@@ -503,6 +642,39 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
             ehs_sheet.write(0, 0, "employee_name", ehs_header_fmt)
             ehs_sheet.write(0, 1, "employee_id", ehs_header_fmt)
             ehs_sheet.write(0, 2, "total_hours", ehs_header_fmt)
+
+        tms_name = "Travel Miles Summary"
+        tms_sheet = writer.book.add_worksheet(tms_name)
+        if len(travel_miles_df):
+            tms_cols = list(travel_miles_df.columns)
+            for col_idx, column_name in enumerate(tms_cols):
+                tms_sheet.write(0, col_idx, column_name, ehs_header_fmt)
+            for row_idx, (_, trow) in enumerate(travel_miles_df.iterrows(), start=1):
+                for col_idx, column_name in enumerate(tms_cols):
+                    val = trow[column_name]
+                    is_miles_col = column_name not in ("employee_name", "employee_id")
+                    fmt = ehs_total_fmt if column_name == "total_miles" else ehs_hours_fmt if is_miles_col else ehs_text_fmt
+                    if column_name in ("employee_name", "employee_id"):
+                        text = "" if pd.isna(val) else str(val).strip()
+                        if text.lower() == "nan":
+                            text = ""
+                        tms_sheet.write_string(row_idx, col_idx, text, ehs_text_fmt)
+                    elif isinstance(val, (int, float)) and not isinstance(val, bool) and pd.notna(val):
+                        tms_sheet.write_number(row_idx, col_idx, float(val), fmt)
+                    else:
+                        tms_sheet.write(row_idx, col_idx, val if pd.notna(val) else "", fmt)
+            tms_ncols = len(tms_cols)
+            tms_sheet.set_column(0, 1, 28)
+            if tms_ncols > 2:
+                tms_sheet.set_column(2, tms_ncols - 2, 14)
+            if tms_ncols > 0:
+                tms_sheet.set_column(tms_ncols - 1, tms_ncols - 1, 16)
+            tms_sheet.freeze_panes(1, 0)
+            tms_sheet.autofilter(0, 0, len(travel_miles_df), tms_ncols - 1)
+        else:
+            tms_sheet.write(0, 0, "employee_name", ehs_header_fmt)
+            tms_sheet.write(0, 1, "employee_id", ehs_header_fmt)
+            tms_sheet.write(0, 2, "total_miles", ehs_header_fmt)
     excel_stream.seek(0)
 
     return output, excel_stream

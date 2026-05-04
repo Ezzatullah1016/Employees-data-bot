@@ -37,6 +37,7 @@ class ProcessTimesheetTests(SimpleTestCase):
         self.assertEqual(output_df.iloc[0]["Earliest Actual Time In"], "08:15 AM")
         self.assertEqual(output_df.iloc[0]["Latest Actual Time Out"], "01:30 PM")
         self.assertEqual(output_df.iloc[0]["Total Hours Worked"], 5.25)
+        self.assertEqual(output_df.iloc[0]["Total Travel Miles"], 0.0)
 
     def test_accepts_csv_input(self):
         source = pd.DataFrame(
@@ -57,6 +58,7 @@ class ProcessTimesheetTests(SimpleTestCase):
         self.assertEqual(len(output_df), 1)
         self.assertEqual(output_df.iloc[0]["Employee"], "Smith, John")
         self.assertEqual(output_df.iloc[0]["Total Hours Worked"], 2.0)
+        self.assertEqual(output_df.iloc[0]["Total Travel Miles"], 0.0)
 
     def test_accepts_header_aliases(self):
         source = pd.DataFrame(
@@ -76,6 +78,30 @@ class ProcessTimesheetTests(SimpleTestCase):
 
         self.assertEqual(output_df.iloc[0]["Employee"], "Stone, Mia")
         self.assertEqual(output_df.iloc[0]["Total Hours Worked"], 8.0)
+
+    def test_accepts_tab_separated_csv_with_csv_extension(self):
+        line = (
+            "First Name\tLast Name\tService Date\tActual Time In\tActual Time Out\n"
+            "Ann\tLee\t2026-03-10\t09:00 AM\t10:00 AM\n"
+        )
+        buf = BytesIO(line.encode("utf-8"))
+        output_df, _ = process_timesheet(buf, filename="payroll.csv")
+        self.assertEqual(output_df.iloc[0]["Employee"], "Lee, Ann")
+        self.assertEqual(output_df.iloc[0]["Total Hours Worked"], 1.0)
+
+    def test_accepts_utf8_bom_on_header(self):
+        inner = "First Name,Last Name,Service Date,Actual Time In,Actual Time Out\n"
+        inner += "Bob,Nguyen,2026-04-05,08:00 AM,09:30 AM\n"
+        buf = BytesIO(inner.encode("utf-8-sig"))
+        output_df, _ = process_timesheet(buf, filename="bom.csv")
+        self.assertEqual(output_df.iloc[0]["Employee"], "Nguyen, Bob")
+
+    def test_accepts_bom_prefix_on_first_column_name(self):
+        inner = "\ufeffFirst Name,Last Name,Service Date,Actual Time In,Actual Time Out\n"
+        inner += "Cara,Moss,2026-04-06,07:00 AM,08:00 AM\n"
+        buf = BytesIO(inner.encode("utf-8"))
+        output_df, _ = process_timesheet(buf, filename="weird.csv")
+        self.assertEqual(output_df.iloc[0]["Employee"], "Moss, Cara")
 
     def test_groups_same_name_by_identifier(self):
         source = pd.DataFrame(
@@ -144,6 +170,59 @@ class ProcessTimesheetTests(SimpleTestCase):
         self.assertEqual(output_df.iloc[0]["Latest Actual Time Out"], "10:00 AM")
         self.assertEqual(output_df.iloc[0]["Call Hours Added"], 0.5)
         self.assertEqual(output_df.iloc[0]["Total Hours Worked"], 2.5)
+
+    def test_sums_travel_miles_per_employee_day(self):
+        source = pd.DataFrame(
+            [
+                {
+                    "Identifier": "X1",
+                    "First Name": "Jane",
+                    "Last Name": "Doe",
+                    "Service Date": "2026-01-02",
+                    "Actual Time In": "08:00 AM",
+                    "Actual Time Out": "10:00 AM",
+                    "Travel Miles": 10,
+                },
+                {
+                    "Identifier": "X1",
+                    "First Name": "Jane",
+                    "Last Name": "Doe",
+                    "Service Date": "2026-01-02",
+                    "Actual Time In": "11:00 AM",
+                    "Actual Time Out": "12:00 PM",
+                    "Travel Miles": 5,
+                },
+                {
+                    "Identifier": "X1",
+                    "First Name": "Jane",
+                    "Last Name": "Doe",
+                    "Service Date": "2026-01-02",
+                    "Service Code": "PatPC",
+                    "Service Description": "Patient Phone Calls",
+                    "Actual Time In": "05:00 PM",
+                    "Actual Time Out": "05:30 PM",
+                    "Pay Units": 0.5,
+                    "Travel Miles": 0,
+                },
+            ]
+        )
+        buf = BytesIO(source.to_csv(index=False).encode("utf-8"))
+        buf.seek(0)
+        output_df, excel_buf = process_timesheet(buf, filename="miles.csv")
+
+        self.assertEqual(len(output_df), 1)
+        self.assertEqual(output_df.iloc[0]["Total Travel Miles"], 15.0)
+        # Visit span from two visits only: 8:00–12:00 (4 h); PatPC row adds 0.5 call hours → 4.5
+        self.assertEqual(output_df.iloc[0]["Total Hours Worked"], 4.5)
+
+        tms = pd.read_excel(excel_buf, sheet_name="Travel Miles Summary")
+        self.assertEqual(float(tms.iloc[0]["total_miles"]), 15.0)
+
+        kpi = pd.read_excel(excel_buf, sheet_name="Summary")
+        self.assertEqual(
+            float(kpi.loc[kpi["Metric"] == "Total travel miles", "Value"].iloc[0]),
+            15.0,
+        )
 
     def test_employee_hours_summary_multi_week_pivot(self):
         source = pd.DataFrame(

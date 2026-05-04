@@ -29,7 +29,7 @@
         <div class="glass-card mb-4">
             <div class="card-body p-4">
                 <h2 class="h4 mb-3">Upload Source File</h2>
-                <p class="text-muted mb-3">Required columns: First Name, Last Name, Service Date, Actual Time In, Actual Time Out.</p>
+                <p class="text-muted mb-3">The header row must map to: First Name, Last Name, Service Date, Actual Time In, Actual Time Out (common aliases like DOS, Time In/Out are accepted).</p>
                 <form method="post" enctype="multipart/form-data" class="row g-3">
                     {% csrf_token %}
                     <div class="col-md-9">
@@ -51,22 +51,28 @@
 
         {% if processed and processed.status == "SUCCESS" %}
             <div class="row g-3 mb-3">
-                <div class="col-md-4">
+                <div class="col-md-3">
                     <div class="glass-card p-3">
                         <div class="small text-muted">Employees</div>
                         <div class="h4 m-0">{{ summary.employees }}</div>
                     </div>
                 </div>
-                <div class="col-md-4">
+                <div class="col-md-3">
                     <div class="glass-card p-3">
                         <div class="small text-muted">Employee-Day Records</div>
                         <div class="h4 m-0">{{ summary.days }}</div>
                     </div>
                 </div>
-                <div class="col-md-4">
+                <div class="col-md-3">
                     <div class="glass-card p-3">
                         <div class="small text-muted">Total Hours</div>
                         <div class="h4 m-0">{{ summary.hours }}</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="glass-card p-3">
+                        <div class="small text-muted">Total Travel Miles</div>
+                        <div class="h4 m-0">{{ summary.total_travel_miles }}</div>
                     </div>
                 </div>
             </div>
@@ -87,6 +93,7 @@
                         <th>Service Date</th>
                         <th>Earliest Actual Time In</th>
                         <th>Latest Actual Time Out</th>
+                        <th>Total Travel Miles</th>
                         <th>Call Hours Added</th>
                         <th>Total Hours Worked</th>
                     </tr>
@@ -98,6 +105,7 @@
                             <td>{{ row.service_date }}</td>
                             <td>{{ row.earliest_time_in }}</td>
                             <td>{{ row.latest_time_out }}</td>
+                            <td>{{ row.total_travel_miles }}</td>
                             <td>{{ row.call_hours_added }}</td>
                             <td>{{ row.total_hours_worked }}</td>
                         </tr>

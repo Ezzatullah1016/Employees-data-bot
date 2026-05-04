@@ -1,3 +1,5 @@
+import json
+import logging
 from io import BytesIO
 
 import pandas as pd
@@ -11,6 +13,8 @@ from django.views.decorators.csrf import csrf_exempt
 from .forms import TimesheetUploadForm
 from .models import ProcessedTimesheet
 from .services import filter_timesheet_fact_rows, process_timesheet
+
+logger = logging.getLogger(__name__)
 
 
 def _snapshot_upload(uploaded):
@@ -59,6 +63,7 @@ def upload_timesheet(request):
             record.save()
             messages.error(request, str(exc))
         except Exception:
+            logger.exception("upload_timesheet: process_timesheet failed")
             record.error_message = "Unexpected error while processing file."
             record.save()
             messages.error(request, "Unexpected error while processing file.")
@@ -74,6 +79,7 @@ def upload_timesheet(request):
                     "Service Date": "service_date",
                     "Earliest Actual Time In": "earliest_time_in",
                     "Latest Actual Time Out": "latest_time_out",
+                    "Total Travel Miles": "total_travel_miles",
                     "Call Hours Added": "call_hours_added",
                     "Total Hours Worked": "total_hours_worked",
                     "Employee": "employee",
@@ -84,6 +90,7 @@ def upload_timesheet(request):
                 "employees": int(output_df["Employee"].nunique()),
                 "days": int(len(output_df)),
                 "hours": round(float(output_df["Total Hours Worked"].sum()), 2),
+                "total_travel_miles": round(float(output_df["Total Travel Miles"].sum()), 2),
             }
         elif processed.error_message:
             messages.error(request, processed.error_message)
@@ -143,19 +150,22 @@ def process_timesheet_api(request):
                 "Service Date": "service_date",
                 "Earliest Actual Time In": "earliest_time_in",
                 "Latest Actual Time Out": "latest_time_out",
+                "Total Travel Miles": "total_travel_miles",
                 "Call Hours Added": "call_hours_added",
                 "Total Hours Worked": "total_hours_worked",
                 "Employee": "employee",
             }
         )
+        preview_rows = json.loads(preview_df.to_json(orient="records", date_format="iso"))
         payload = {
             "ok": True,
             "summary": {
                 "employees": int(output_df["Employee"].nunique()),
                 "days": int(len(output_df)),
                 "hours": round(float(output_df["Total Hours Worked"].sum()), 2),
+                "total_travel_miles": round(float(output_df["Total Travel Miles"].sum()), 2),
             },
-            "preview_rows": preview_df.to_dict(orient="records"),
+            "preview_rows": preview_rows,
             "download_url": f"/download/{record.id}/",
         }
         return JsonResponse(payload)
@@ -164,6 +174,7 @@ def process_timesheet_api(request):
         record.save()
         return JsonResponse({"ok": False, "error": str(exc)}, status=400)
     except Exception:
+        logger.exception("process_timesheet_api: process_timesheet or response build failed")
         record.error_message = "Unexpected error while processing file."
         record.save()
         return JsonResponse(
