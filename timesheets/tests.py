@@ -171,6 +171,43 @@ class ProcessTimesheetTests(SimpleTestCase):
         self.assertEqual(output_df.iloc[0]["Call Hours Added"], 0.5)
         self.assertEqual(output_df.iloc[0]["Total Hours Worked"], 2.5)
 
+    def test_adds_over_30_minute_travel_time_like_patient_calls(self):
+        source = pd.DataFrame(
+            [
+                {
+                    "Identifier": "PV1",
+                    "First Name": "Jane",
+                    "Last Name": "Doe",
+                    "Service Date": "2026-01-02",
+                    "Service Code": "RNV",
+                    "Actual Time In": "08:00 AM",
+                    "Actual Time Out": "10:00 AM",
+                    "Pay Units": 1.0,
+                },
+                {
+                    "Identifier": "PV1",
+                    "First Name": "Jane",
+                    "Last Name": "Doe",
+                    "Service Date": "2026-01-02",
+                    "Service Code": "TRAVL",
+                    "Service Description": "Over 30 Minute Travel Time",
+                    "Actual Time In": "05:00 PM",
+                    "Actual Time Out": "05:30 PM",
+                    "Pay Units": 0.4,
+                },
+            ]
+        )
+        input_stream = BytesIO(source.to_csv(index=False).encode("utf-8"))
+
+        output_df, _ = process_timesheet(input_stream, filename="travel_time.csv")
+
+        self.assertEqual(len(output_df), 1)
+        self.assertEqual(output_df.iloc[0]["Employee"], "Doe, Jane (PV1)")
+        self.assertEqual(output_df.iloc[0]["Earliest Actual Time In"], "08:00 AM")
+        self.assertEqual(output_df.iloc[0]["Latest Actual Time Out"], "10:00 AM")
+        self.assertEqual(output_df.iloc[0]["Call Hours Added"], 0.4)
+        self.assertEqual(output_df.iloc[0]["Total Hours Worked"], 2.4)
+
     def test_sums_travel_miles_per_employee_day(self):
         source = pd.DataFrame(
             [

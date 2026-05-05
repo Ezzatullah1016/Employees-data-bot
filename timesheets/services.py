@@ -71,7 +71,7 @@ HEADER_ALIASES = {
     "Pay Units": {"pay units", "units"},
     "Travel Miles": {"travel miles", "miles", "mileage", "travel mileage"},
 }
-CALL_PAY_CODES = {"PATPC"}
+ADDED_HOURS_CODES = {"PATPC", "TRAVL"}
 _EMPLOYEE_LABEL_ID = re.compile(r"^(.*) \(([^)]+)\)$")
 
 
@@ -265,9 +265,10 @@ def process_timesheet(file_obj, filename: str | None = None) -> tuple[pd.DataFra
     )
 
     call_mask = (
-        df["Service Code"].isin(CALL_PAY_CODES)
-        | df["Earnings Code"].isin(CALL_PAY_CODES)
+        df["Service Code"].isin(ADDED_HOURS_CODES)
+        | df["Earnings Code"].isin(ADDED_HOURS_CODES)
         | df["Service Description"].str.contains("patient phone call", regex=False)
+        | df["Service Description"].str.contains("over 30 minute travel time", regex=False)
     )
     df["Call Hours Added"] = 0.0
     df.loc[call_mask, "Call Hours Added"] = (df.loc[call_mask, "Pay Units"].fillna(0) * 1.0).astype(float)
