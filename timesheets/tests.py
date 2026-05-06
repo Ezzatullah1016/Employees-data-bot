@@ -3,10 +3,51 @@ from io import BytesIO
 import pandas as pd
 from django.test import SimpleTestCase
 
-from .services import filter_timesheet_fact_rows, process_timesheet
+from .services import filter_timesheet_fact_rows, process_timesheet, process_timesheets
 
 
 class ProcessTimesheetTests(SimpleTestCase):
+    def test_processes_multiple_files_into_single_output(self):
+        source1 = pd.DataFrame(
+            [
+                {
+                    "First Name": "Jane",
+                    "Last Name": "Doe",
+                    "Service Date": "2026-01-02",
+                    "Actual Time In": "08:00 AM",
+                    "Actual Time Out": "09:00 AM",
+                }
+            ]
+        )
+        source2 = pd.DataFrame(
+            [
+                {
+                    "First Name": "Jane",
+                    "Last Name": "Doe",
+                    "Service Date": "2026-01-02",
+                    "Service Code": "TRAVL",
+                    "Service Description": "Over 30 Minute Travel Time",
+                    "Pay Units": 0.5,
+                    "Actual Time In": "10:00 AM",
+                    "Actual Time Out": "10:30 AM",
+                }
+            ]
+        )
+        files = [
+            (BytesIO(source1.to_csv(index=False).encode("utf-8")), "part1.csv"),
+            (BytesIO(source2.to_csv(index=False).encode("utf-8")), "part2.csv"),
+        ]
+        output_df, _ = process_timesheets(files)
+
+        self.assertEqual(len(output_df), 2)
+        self.assertSetEqual(set(output_df["Source File"]), {"part1.csv", "part2.csv"})
+        self.assertEqual(round(float(output_df["Total Hours Worked"].sum()), 2), 1.5)
+        timesheet_sheet = pd.read_excel(_, sheet_name="Timesheet")
+        employee_col = set(timesheet_sheet["Employee"].astype(str))
+        self.assertIn("File Grand Total (part1.csv)", employee_col)
+        self.assertIn("File Grand Total (part2.csv)", employee_col)
+        self.assertIn("OVERALL GRAND TOTAL", employee_col)
+
     def test_groups_by_employee_and_service_date(self):
         source = pd.DataFrame(
             [

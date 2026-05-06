@@ -12,7 +12,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from .forms import TimesheetUploadForm
 from .models import ProcessedTimesheet
-from .services import filter_timesheet_fact_rows, process_timesheet
+from .services import filter_timesheet_fact_rows, process_timesheets
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,20 @@ def _snapshot_upload(uploaded):
     return upload_name, payload
 
 
+def _collect_uploaded_files(request):
+    uploads = request.FILES.getlist("file")
+    allowed = (".xlsx", ".xls", ".csv")
+    if not uploads:
+        raise ValueError("Please upload at least one file.")
+    invalid = [u.name for u in uploads if not u.name.lower().endswith(allowed)]
+    if invalid:
+        raise ValueError(
+            "Please upload valid files only (.xlsx, .xls, or .csv). Invalid: "
+            + ", ".join(invalid)
+        )
+    return uploads
+
+
 @require_http_methods(["GET", "POST"])
 def upload_timesheet(request):
     form = TimesheetUploadForm(request.POST or None, request.FILES or None)
@@ -36,37 +50,45 @@ def upload_timesheet(request):
     processed_id = request.GET.get("processed_id")
     processed = None
 
-    if request.method == "POST" and form.is_valid():
-        uploaded_file = form.cleaned_data["file"]
-        upload_name, upload_bytes = _snapshot_upload(uploaded_file)
-
-        # Remove any old ProcessedTimesheet with the same file name (avoid caching issues)
-        ProcessedTimesheet.objects.filter(source_file=f"uploads/{upload_name}").delete()
-
-        record = ProcessedTimesheet.objects.create(
-            status=ProcessedTimesheet.Status.FAILED,
-        )
-        record.source_file.save(upload_name, ContentFile(upload_bytes), save=False)
+    if request.method == "POST":
         try:
-            output_df, output_stream = process_timesheet(BytesIO(upload_bytes), filename=upload_name)
-            record.output_file.save(
-                f"timesheet_{record.id}.xlsx",
-                ContentFile(output_stream.getvalue()),
-                save=False,
-            )
-            record.status = ProcessedTimesheet.Status.SUCCESS
-            record.error_message = ""
-            record.save()
-            return redirect(f"/?processed_id={record.id}")
+            uploaded_files = _collect_uploaded_files(request)
         except ValueError as exc:
-            record.error_message = str(exc)
-            record.save()
             messages.error(request, str(exc))
-        except Exception:
-            logger.exception("upload_timesheet: process_timesheet failed")
-            record.error_message = "Unexpected error while processing file."
-            record.save()
-            messages.error(request, "Unexpected error while processing file.")
+            uploaded_files = []
+        if uploaded_files:
+            snapshots = [_snapshot_upload(uploaded) for uploaded in uploaded_files]
+            upload_name, upload_bytes = snapshots[0]
+
+            # Remove any old ProcessedTimesheet with the same first file name (avoid caching issues)
+            ProcessedTimesheet.objects.filter(source_file=f"uploads/{upload_name}").delete()
+
+            record = ProcessedTimesheet.objects.create(
+                status=ProcessedTimesheet.Status.FAILED,
+            )
+            record.source_file.save(upload_name, ContentFile(upload_bytes), save=False)
+            try:
+                output_df, output_stream = process_timesheets(
+                    [(BytesIO(payload), name) for name, payload in snapshots]
+                )
+                record.output_file.save(
+                    f"timesheet_{record.id}.xlsx",
+                    ContentFile(output_stream.getvalue()),
+                    save=False,
+                )
+                record.status = ProcessedTimesheet.Status.SUCCESS
+                record.error_message = ""
+                record.save()
+                return redirect(f"/?processed_id={record.id}")
+            except ValueError as exc:
+                record.error_message = str(exc)
+                record.save()
+                messages.error(request, str(exc))
+            except Exception:
+                logger.exception("upload_timesheet: process_timesheets failed")
+                record.error_message = "Unexpected error while processing file."
+                record.save()
+                messages.error(request, "Unexpected error while processing file.")
 
     if processed_id:
         processed = get_object_or_404(ProcessedTimesheet, pk=processed_id)
@@ -76,6 +98,7 @@ def upload_timesheet(request):
             output_df = filter_timesheet_fact_rows(output_df)
             preview_df = output_df.rename(
                 columns={
+                    "Source File": "source_file",
                     "Service Date": "service_date",
                     "Earliest Actual Time In": "earliest_time_in",
                     "Latest Actual Time Out": "latest_time_out",
@@ -124,17 +147,21 @@ def react_app(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 def process_timesheet_api(request):
-    uploaded = request.FILES.get("file")
-    if not uploaded:
-        return JsonResponse({"ok": False, "error": "Please upload a file."}, status=400)
-    upload_name, upload_bytes = _snapshot_upload(uploaded)
+    try:
+        uploaded_files = _collect_uploaded_files(request)
+    except ValueError as exc:
+        return JsonResponse({"ok": False, "error": str(exc)}, status=400)
+    snapshots = [_snapshot_upload(uploaded) for uploaded in uploaded_files]
+    upload_name, upload_bytes = snapshots[0]
 
     record = ProcessedTimesheet.objects.create(
         status=ProcessedTimesheet.Status.FAILED,
     )
     record.source_file.save(upload_name, ContentFile(upload_bytes), save=False)
     try:
-        output_df, output_stream = process_timesheet(BytesIO(upload_bytes), filename=upload_name)
+        output_df, output_stream = process_timesheets(
+            [(BytesIO(payload), name) for name, payload in snapshots]
+        )
         record.output_file.save(
             f"timesheet_{record.id}.xlsx",
             ContentFile(output_stream.getvalue()),
@@ -147,6 +174,7 @@ def process_timesheet_api(request):
         output_df = filter_timesheet_fact_rows(output_df)
         preview_df = output_df.rename(
             columns={
+                "Source File": "source_file",
                 "Service Date": "service_date",
                 "Earliest Actual Time In": "earliest_time_in",
                 "Latest Actual Time Out": "latest_time_out",
@@ -174,7 +202,7 @@ def process_timesheet_api(request):
         record.save()
         return JsonResponse({"ok": False, "error": str(exc)}, status=400)
     except Exception:
-        logger.exception("process_timesheet_api: process_timesheet or response build failed")
+        logger.exception("process_timesheet_api: process_timesheets or response build failed")
         record.error_message = "Unexpected error while processing file."
         record.save()
         return JsonResponse(

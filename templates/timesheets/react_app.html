@@ -11,7 +11,7 @@
 const { useRef, useState } = React;
 
 function App() {
-  const [file, setFile] = useState(null);
+  const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [rows, setRows] = useState([]);
@@ -23,8 +23,8 @@ function App() {
     inputRef.current?.click();
   }
 
-  function onFilePicked(nextFile) {
-    setFile(nextFile || null);
+  function onFilesPicked(nextFiles) {
+    setFiles(nextFiles || []);
     setError("");
   }
 
@@ -44,9 +44,9 @@ function App() {
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
-    const dropped = e.dataTransfer?.files?.[0];
-    if (dropped) {
-      onFilePicked(dropped);
+    const dropped = Array.from(e.dataTransfer?.files || []);
+    if (dropped.length) {
+      onFilesPicked(dropped);
     }
   }
 
@@ -56,15 +56,15 @@ function App() {
     setRows([]);
     setDownloadUrl("");
 
-    if (!file) {
-      setError("Please choose a file first.");
+    if (!files.length) {
+      setError("Please choose at least one file.");
       return;
     }
 
     setLoading(true);
     try {
       const body = new FormData();
-      body.append("file", file);
+      files.forEach((f) => body.append("file", f));
       const response = await fetch("/api/process/", { method: "POST", body });
       const data = await response.json();
       if (!response.ok || !data.ok) {
@@ -106,13 +106,14 @@ function App() {
       <div className="glass-card p-4 mb-4">
         <form onSubmit={runBot} className="row g-3">
           <div className="col-md-9">
-            <label className="form-label fw-semibold">Upload timesheet file</label>
+            <label className="form-label fw-semibold">Upload timesheet file(s)</label>
             <input
               ref={inputRef}
               type="file"
               className="hidden-input"
               accept=".csv,.xlsx,.xls"
-              onChange={(e) => onFilePicked(e.target.files?.[0] || null)}
+              multiple
+              onChange={(e) => onFilesPicked(Array.from(e.target.files || []))}
             />
             <div
               role="button"
@@ -130,14 +131,14 @@ function App() {
                 }
               }}
             >
-              <div className="fw-semibold mb-1">Drag & drop file here</div>
+              <div className="fw-semibold mb-1">Drag & drop one or more files here</div>
               <div className="small text-secondary">or click to browse your computer</div>
               <div className="small text-secondary mt-2">
                 Accepted: .csv, .xlsx, .xls
               </div>
-              {file && (
+              {files.length > 0 && (
                 <div className="mt-3 small text-primary fw-semibold">
-                  Selected: {file.name}
+                  Selected ({files.length}): {files.map((f) => f.name).join(", ")}
                 </div>
               )}
             </div>
@@ -168,6 +169,7 @@ function App() {
           <table className="table table-hover table-bordered align-middle bg-white mb-0">
             <thead className="table-light">
               <tr>
+                <th>Source File</th>
                 <th>Employee</th>
                 <th>Service Date</th>
                 <th>Earliest Actual Time In</th>
@@ -180,6 +182,7 @@ function App() {
             <tbody>
               {rows.map((row, idx) => (
                 <tr key={idx}>
+                  <td>{row.source_file}</td>
                   <td>{row.employee}</td>
                   <td>{row.service_date}</td>
                   <td>{row.earliest_time_in}</td>

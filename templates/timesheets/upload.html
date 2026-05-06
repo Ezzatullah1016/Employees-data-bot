@@ -89,6 +89,7 @@
                 <table class="table table-hover table-bordered align-middle bg-white mb-0">
                     <thead class="table-light">
                     <tr>
+                        <th>Source File</th>
                         <th>Employee</th>
                         <th>Service Date</th>
                         <th>Earliest Actual Time In</th>
@@ -101,6 +102,7 @@
                     <tbody>
                     {% for row in preview_rows %}
                         <tr>
+                            <td>{{ row.source_file }}</td>
                             <td>{{ row.employee }}</td>
                             <td>{{ row.service_date }}</td>
                             <td>{{ row.earliest_time_in }}</td>

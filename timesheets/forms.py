@@ -1,15 +1,13 @@
 from django import forms
 
 
+class MultiFileInput(forms.ClearableFileInput):
+    allow_multiple_selected = True
+
+
 class TimesheetUploadForm(forms.Form):
     file = forms.FileField(
-        label="Timesheet File",
-        help_text="Upload .xlsx, .xls, or .csv with healthcare visit rows.",
+        label="Timesheet File(s)",
+        help_text="Upload one or more .xlsx, .xls, or .csv files with healthcare visit rows.",
+        widget=MultiFileInput(attrs={"multiple": True}),
     )
-
-    def clean_file(self):
-        uploaded = self.cleaned_data["file"]
-        allowed = (".xlsx", ".xls", ".csv")
-        if not uploaded.name.lower().endswith(allowed):
-            raise forms.ValidationError("Please upload a valid file (.xlsx, .xls, or .csv).")
-        return uploaded
