@@ -30,6 +30,7 @@
             <div class="card-body p-4">
                 <h2 class="h4 mb-3">Upload Source File</h2>
                 <p class="text-muted mb-3">The header row must map to: First Name, Last Name, Service Date, Actual Time In, Actual Time Out (common aliases like DOS, Time In/Out are accepted).</p>
+                <p class="text-muted small mb-3">Optional: add <strong>Employee Classification</strong> (or <strong>Employment Type</strong>, Staff Classification, Worker Type, …) so the Excel report includes a <strong>Staff Classification Summary</strong> sheet. Use values such as <em>Contractor</em>, <em>Field Staff - Part Time</em>, or <em>Field Staff - Full Time</em>; rows without a match are grouped under Unclassified. Excel files like <strong>Associate Productivity</strong> (header after title rows) are supported: <strong>Associate Name</strong> (Last, First), <strong>Actual In</strong> / <strong>Actual Out</strong>, and <strong>Classification</strong> map automatically.</p>
                 <form method="post" enctype="multipart/form-data" class="row g-3">
                     {% csrf_token %}
                     <div class="col-md-9">

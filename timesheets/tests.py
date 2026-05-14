@@ -3,7 +3,14 @@ from io import BytesIO
 import pandas as pd
 from django.test import SimpleTestCase
 
-from .services import filter_timesheet_fact_rows, process_timesheet, process_timesheets
+from openpyxl import load_workbook
+
+from .services import (
+    CLASSIFICATION_SHEET_NAME,
+    filter_timesheet_fact_rows,
+    process_timesheet,
+    process_timesheets,
+)
 
 
 class ProcessTimesheetTests(SimpleTestCase):
@@ -424,6 +431,140 @@ class ProcessTimesheetTests(SimpleTestCase):
             eid == "" or (isinstance(eid, float) and pd.isna(eid)) or pd.isna(eid),
             msg="empty id should be blank; pandas often reads that as NaN from xlsx",
         )
+
+    def test_associate_productivity_excel_skips_title_rows(self):
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.cell(1, 1, "Associate Productivity")
+        ws.cell(2, 1, "Revolutionary Home Health and Hospice")
+        ws.cell(3, 1, "User: Jennifer Feldra")
+        ws.cell(4, 1, "Agencies: … Date range: 5/3/2026 to 5/16/2026")
+        ws.cell(5, 1, "Thursday, May 14, 2026")
+        headers = [
+            "Associate Name",
+            "Week",
+            "Patient Name",
+            "Service Date",
+            "Service",
+            "Status",
+            "Classification",
+            "Actual In",
+            "Actual Out",
+        ]
+        for col_idx, h in enumerate(headers, start=1):
+            ws.cell(6, col_idx, h)
+        ws.cell(7, 1, "Doe, Jane")
+        ws.cell(7, 4, "2026-05-08")
+        ws.cell(7, 5, "HHA Visit")
+        ws.cell(7, 7, "Field Staff - Full Time")
+        ws.cell(7, 8, "10:11")
+        ws.cell(7, 9, "10:57")
+        bio = BytesIO()
+        wb.save(bio)
+        bio.seek(0)
+
+        output_df, excel_buf = process_timesheet(bio, filename="associate_productivity.xlsx")
+
+        self.assertEqual(len(output_df), 1)
+        self.assertEqual(output_df.iloc[0]["Employee"], "Doe, Jane")
+        self.assertEqual(round(float(output_df.iloc[0]["Total Hours Worked"]), 2), 0.77)
+
+        excel_buf.seek(0)
+        wb_out = load_workbook(excel_buf, data_only=True)
+        self.assertIn(CLASSIFICATION_SHEET_NAME, wb_out.sheetnames)
+
+    def test_staff_classification_summary_sheet(self):
+        source = pd.DataFrame(
+            [
+                {
+                    "Employment Type": "Contractor",
+                    "First Name": "Ann",
+                    "Last Name": "Hire",
+                    "Service Date": "2026-02-01",
+                    "Service Description": "PT Eval",
+                    "Actual Time In": "10:00 AM",
+                    "Actual Time Out": "11:00 AM",
+                    "Travel Miles": 3.0,
+                },
+                {
+                    "Employment Type": "Contractor",
+                    "First Name": "Ann",
+                    "Last Name": "Hire",
+                    "Service Date": "2026-02-01",
+                    "Service Description": "PT Eval",
+                    "Actual Time In": "02:00 PM",
+                    "Actual Time Out": "03:00 PM",
+                    "Travel Miles": 2.0,
+                },
+                {
+                    "Employment Type": "Field Staff - Part Time",
+                    "First Name": "Ben",
+                    "Last Name": "Part",
+                    "Service Date": "2026-02-01",
+                    "Service Description": "RN SOC Assessment",
+                    "Actual Time In": "09:00 AM",
+                    "Actual Time Out": "01:00 PM",
+                    "Travel Miles": 10.0,
+                },
+                {
+                    "Employment Type": "Field Staff - Part Time",
+                    "First Name": "Ben",
+                    "Last Name": "Part",
+                    "Service Date": "2026-02-01",
+                    "Service Code": "PatPC",
+                    "Service Description": "Patient Phone Calls",
+                    "Actual Time In": "05:00 PM",
+                    "Actual Time Out": "05:30 PM",
+                    "Pay Units": 0.25,
+                    "Travel Miles": 0.0,
+                },
+                {
+                    "Employment Type": "Full time",
+                    "First Name": "Carla",
+                    "Last Name": "Full",
+                    "Service Date": "2026-02-01",
+                    "Service Description": "HHA Visit",
+                    "Actual Time In": "01:00 PM",
+                    "Actual Time Out": "02:00 PM",
+                    "Travel Miles": 1.0,
+                },
+            ]
+        )
+        buf = BytesIO(source.to_csv(index=False).encode("utf-8"))
+        buf.seek(0)
+        _, excel_buf = process_timesheet(buf, filename="classified.csv")
+
+        excel_buf.seek(0)
+        wb = load_workbook(excel_buf, data_only=True)
+        self.assertIn(CLASSIFICATION_SHEET_NAME, wb.sheetnames)
+        ws = wb[CLASSIFICATION_SHEET_NAME]
+        rows = [tuple(c.value for c in r) for r in ws.iter_rows()]
+
+        def first_total_miles_after_title(title: str) -> float:
+            seen = False
+            for row in rows:
+                v0 = row[0] if row else None
+                if v0 == title:
+                    seen = True
+                elif seen and v0 == "Total miles (all services)":
+                    return float(row[1])
+            raise AssertionError(f"no Total miles after {title!r}")
+
+        self.assertEqual(first_total_miles_after_title("Contractors"), 5.0)
+        self.assertEqual(first_total_miles_after_title("Field Staff - Part Time"), 10.0)
+        self.assertEqual(first_total_miles_after_title("Field Staff - Full Time"), 1.0)
+
+        def hours_for_service_row(svc: str) -> float:
+            for row in rows:
+                if row[0] == svc and row[2] is not None:
+                    return float(row[2])
+            raise AssertionError(f"no service row {svc!r}")
+
+        self.assertEqual(hours_for_service_row("rn soc assessment"), 4.0)
+        self.assertEqual(hours_for_service_row("patient phone calls"), 0.25)
+        self.assertEqual(hours_for_service_row("hha visit"), 1.0)
 
     def test_filter_timesheet_fact_rows_excludes_totals(self):
         frame = pd.DataFrame(

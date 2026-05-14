@@ -16,6 +16,7 @@ REQUIRED_COLUMNS = [
 OPTIONAL_COLUMNS = [
     "Identifier",
     "Employee Name",
+    "Employee Classification",
     "Service Code",
     "Service Description",
     "Earnings Code",
@@ -49,6 +50,7 @@ HEADER_ALIASES = {
     },
     "Actual Time In": {
         "actual time in",
+        "actual in",
         "time in",
         "start time",
         "clock in",
@@ -58,6 +60,7 @@ HEADER_ALIASES = {
     },
     "Actual Time Out": {
         "actual time out",
+        "actual out",
         "time out",
         "end time",
         "clock out",
@@ -66,11 +69,28 @@ HEADER_ALIASES = {
         "time-out",
     },
     "Service Code": {"service code", "svc code"},
-    "Service Description": {"service description", "service desc", "description"},
+    "Service Description": {"service description", "service desc", "description", "service"},
     "Earnings Code": {"earnings code", "earning code"},
     "Pay Units": {"pay units", "units"},
     "Travel Miles": {"travel miles", "miles", "mileage", "travel mileage"},
+    "Employee Classification": {
+        "employee classification",
+        "staff classification",
+        "employment type",
+        "employee type",
+        "worker type",
+        "job classification",
+        "payroll classification",
+        "classification",
+    },
 }
+CLASSIFICATION_SHEET_NAME = "Staff Classification Summary"
+CLASSIFICATION_BUCKETS_ORDER: tuple[str, ...] = (
+    "Contractors",
+    "Field Staff - Part Time",
+    "Field Staff - Full Time",
+    "Unclassified",
+)
 ADDED_HOURS_CODES = {"PATPC", "TRAVL"}
 _EMPLOYEE_LABEL_ID = re.compile(r"^(.*) \(([^)]+)\)$")
 
@@ -117,6 +137,234 @@ def _sanitize(text: str) -> str:
     return re.sub(r"\s+", " ", str(text).strip().lower())
 
 
+def _normalize_employee_classification(raw: object) -> str:
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return "Unclassified"
+    text = str(raw).strip()
+    if not text or text.lower() == "nan":
+        return "Unclassified"
+    for ch in ("\u2013", "\u2014", "\u2212"):
+        text = text.replace(ch, "-")
+    s = _sanitize(text)
+    if "contract" in s or "1099" in s or "independent contractor" in s:
+        return "Contractors"
+    if "field staff" in s:
+        if "part" in s:
+            return "Field Staff - Part Time"
+        if "full" in s:
+            return "Field Staff - Full Time"
+    if "part" in s and "time" in s:
+        return "Field Staff - Part Time"
+    if "full" in s and "time" in s:
+        return "Field Staff - Full Time"
+    return "Unclassified"
+
+
+def _classification_mode_for_series(values: pd.Series) -> str:
+    series = pd.Series(values).dropna()
+    if series.empty:
+        return "Unclassified"
+    vc = series.value_counts()
+    max_ct = int(vc.max())
+    top = vc[vc == max_ct]
+    if len(top) > 1:
+        return "Unclassified"
+    return str(top.index[0])
+
+
+def _build_classification_frame(df: pd.DataFrame) -> pd.DataFrame:
+    call_mask = (
+        df["Service Code"].isin(ADDED_HOURS_CODES)
+        | df["Earnings Code"].isin(ADDED_HOURS_CODES)
+        | df["Service Description"].str.contains("patient phone call", regex=False)
+        | df["Service Description"].str.contains("over 30 minute travel time", regex=False)
+    )
+    svc_desc = df["Service Description"].fillna("").astype(str).str.strip()
+    svc_code = df["Service Code"].fillna("").astype(str).str.strip()
+    display = svc_desc.where(svc_desc.ne("") & svc_desc.str.lower().ne("nan"), "")
+    empty_disp = display.eq("") | display.str.lower().eq("nan")
+    display = display.mask(empty_disp, svc_code)
+    empty_disp2 = display.eq("") | display.str.lower().eq("nan")
+    display = display.mask(empty_disp2, "(no service)")
+
+    row_cls = (
+        df["Employee Classification"].fillna("").astype(str).str.strip().replace({"nan": ""}).map(_normalize_employee_classification)
+    )
+    tmp = df[["Source File", "Employee Label"]].copy()
+    tmp["_row_bucket"] = row_cls
+    employee_bucket = tmp.groupby(["Source File", "Employee Label"], sort=False)["_row_bucket"].transform(
+        _classification_mode_for_series
+    )
+
+    row_hours = pd.Series(0.0, index=df.index, dtype="float64")
+    row_hours.loc[call_mask] = df.loc[call_mask, "Pay Units"].fillna(0).astype(float)
+    non_call = ~call_mask
+    tin = df["Time In DT"]
+    tout = df["Time Out DT"]
+    valid = non_call & tin.notna() & tout.notna()
+    tout_adj = tout.copy()
+    late = valid & (tout < tin)
+    tout_adj.loc[late] = tout_adj.loc[late] + pd.Timedelta(days=1)
+    span_hours = (tout_adj - tin).dt.total_seconds() / 3600.0
+    row_hours.loc[valid] = span_hours.loc[valid].fillna(0.0).astype(float)
+
+    return pd.DataFrame(
+        {
+            "source_file": df["Source File"].astype(str),
+            "employee_label": df["Employee Label"].astype(str),
+            "employee_bucket": employee_bucket.astype(str),
+            "service_display": display.astype(str),
+            "row_hours": row_hours.astype(float),
+            "travel_miles": pd.to_numeric(df["Travel Miles"], errors="coerce").fillna(0.0).astype(float),
+        }
+    )
+
+
+def _write_classification_summary_sheet(
+    book,
+    sheet,
+    class_df: pd.DataFrame,
+    *,
+    section_title_fmt,
+    subsection_fmt,
+    header_fmt,
+    text_fmt,
+    num_fmt,
+) -> None:
+    r = 0
+    for bucket in CLASSIFICATION_BUCKETS_ORDER:
+        sub = class_df.loc[class_df["employee_bucket"] == bucket].copy()
+        sheet.merge_range(r, 0, r, 3, bucket, section_title_fmt)
+        r += 1
+
+        sheet.write(r, 0, "Employees", subsection_fmt)
+        r += 1
+        sheet.write(r, 0, "Source File", header_fmt)
+        sheet.write(r, 1, "Employee", header_fmt)
+        r += 1
+        emp_tbl = sub[["source_file", "employee_label"]].drop_duplicates()
+        emp_tbl = emp_tbl.sort_values(["source_file", "employee_label"], kind="stable")
+        if emp_tbl.empty:
+            sheet.write(r, 0, "(no rows in this classification)", text_fmt)
+            r += 1
+        else:
+            for _, er in emp_tbl.iterrows():
+                sheet.write_string(r, 0, str(er["source_file"]), text_fmt)
+                sheet.write_string(r, 1, str(er["employee_label"]), text_fmt)
+                r += 1
+
+        r += 1
+        sheet.write(r, 0, "Service summary", subsection_fmt)
+        r += 1
+
+        if bucket == "Contractors":
+            grp = (
+                sub.groupby("service_display", sort=True)
+                .agg(line_count=("service_display", "size"), miles=("travel_miles", "sum"))
+                .reset_index()
+            )
+            sheet.write(r, 0, "Service", header_fmt)
+            sheet.write(r, 1, "Line count", header_fmt)
+            r += 1
+            for _, gr in grp.iterrows():
+                sheet.write_string(r, 0, str(gr["service_display"]), text_fmt)
+                sheet.write_number(r, 1, int(gr["line_count"]), num_fmt)
+                r += 1
+            r += 1
+            total_miles = float(sub["travel_miles"].sum())
+            sheet.write(r, 0, "Total miles (all services)", subsection_fmt)
+            sheet.write_number(r, 1, round(total_miles, 2), num_fmt)
+            r += 1
+            r += 1
+            sheet.write(r, 0, "Miles by service", subsection_fmt)
+            r += 1
+            sheet.write(r, 0, "Service", header_fmt)
+            sheet.write(r, 1, "Miles", header_fmt)
+            r += 1
+            miles_svc = grp.loc[grp["miles"] > 0, ["service_display", "miles"]].sort_values("service_display")
+            if miles_svc.empty:
+                sheet.write(r, 0, "(no mileage on lines)", text_fmt)
+                r += 1
+            else:
+                for _, mr in miles_svc.iterrows():
+                    sheet.write_string(r, 0, str(mr["service_display"]), text_fmt)
+                    sheet.write_number(r, 1, round(float(mr["miles"]), 2), num_fmt)
+                    r += 1
+
+        elif bucket == "Field Staff - Part Time":
+            grp = (
+                sub.groupby("service_display", sort=True)
+                .agg(
+                    line_count=("service_display", "size"),
+                    total_hours=("row_hours", "sum"),
+                    miles=("travel_miles", "sum"),
+                )
+                .reset_index()
+            )
+            sheet.write(r, 0, "Service", header_fmt)
+            sheet.write(r, 1, "Line count", header_fmt)
+            sheet.write(r, 2, "Total hours", header_fmt)
+            r += 1
+            for _, gr in grp.iterrows():
+                sheet.write_string(r, 0, str(gr["service_display"]), text_fmt)
+                sheet.write_number(r, 1, int(gr["line_count"]), num_fmt)
+                sheet.write_number(r, 2, round(float(gr["total_hours"]), 2), num_fmt)
+                r += 1
+            r += 1
+            total_miles = float(sub["travel_miles"].sum())
+            sheet.write(r, 0, "Total miles (all services)", subsection_fmt)
+            sheet.write_number(r, 1, round(total_miles, 2), num_fmt)
+            r += 1
+            r += 1
+            sheet.write(r, 0, "Mileage by staff", subsection_fmt)
+            r += 1
+            sheet.write(r, 0, "Source File", header_fmt)
+            sheet.write(r, 1, "Employee", header_fmt)
+            sheet.write(r, 2, "Total miles", header_fmt)
+            r += 1
+            miles_staff = (
+                sub.groupby(["source_file", "employee_label"], sort=False)["travel_miles"].sum().reset_index()
+            )
+            miles_staff = miles_staff.sort_values(["source_file", "employee_label"], kind="stable")
+            for _, mr in miles_staff.iterrows():
+                sheet.write_string(r, 0, str(mr["source_file"]), text_fmt)
+                sheet.write_string(r, 1, str(mr["employee_label"]), text_fmt)
+                sheet.write_number(r, 2, round(float(mr["travel_miles"]), 2), num_fmt)
+                r += 1
+
+        else:
+            # Field Staff - Full Time and Unclassified
+            grp = (
+                sub.groupby("service_display", sort=True)
+                .agg(
+                    line_count=("service_display", "size"),
+                    total_hours=("row_hours", "sum"),
+                    miles=("travel_miles", "sum"),
+                )
+                .reset_index()
+            )
+            sheet.write(r, 0, "Service", header_fmt)
+            sheet.write(r, 1, "Line count", header_fmt)
+            sheet.write(r, 2, "Total hours", header_fmt)
+            r += 1
+            for _, gr in grp.iterrows():
+                sheet.write_string(r, 0, str(gr["service_display"]), text_fmt)
+                sheet.write_number(r, 1, int(gr["line_count"]), num_fmt)
+                sheet.write_number(r, 2, round(float(gr["total_hours"]), 2), num_fmt)
+                r += 1
+            r += 1
+            total_miles = float(sub["travel_miles"].sum())
+            sheet.write(r, 0, "Total miles (all services)", subsection_fmt)
+            sheet.write_number(r, 1, round(total_miles, 2), num_fmt)
+            r += 1
+
+        r += 2
+
+    sheet.set_column(0, 0, 36)
+    sheet.set_column(1, 1, 40)
+    sheet.set_column(2, 2, 14)
+
+
 def _canonicalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     mapping = {}
     for col in df.columns:
@@ -139,6 +387,65 @@ def _canonicalize_columns(df: pd.DataFrame) -> pd.DataFrame:
             + ". Save as CSV UTF-8 or Excel with a header row that includes first/last name, service date, and clock in/out."
         )
     return renamed
+
+
+_EXCEL_HEADER_PROBE_MAX = 30
+
+
+def _preprocess_productivity_style_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Split 'Associate Name' (Last, First) into First/Last when those columns are not both present."""
+    out = df.copy()
+    key_to_col = {_sanitize(str(c)): str(c) for c in out.columns}
+    has_first = "first name" in key_to_col
+    has_last = "last name" in key_to_col
+    if "associate name" not in key_to_col or (has_first and has_last):
+        return out
+    acol = key_to_col["associate name"]
+    combined = out[acol].fillna("").astype(str).str.strip()
+    combined = combined.replace({"nan": "", "NaT": "", "<NA>": ""})
+    parts = combined.str.split(",", n=1, expand=True)
+    out["Last Name"] = parts[0].fillna("").astype(str).str.strip()
+    if parts.shape[1] > 1:
+        out["First Name"] = parts[1].fillna("").astype(str).str.strip()
+    else:
+        out["First Name"] = ""
+    out["Employee Name"] = combined
+    return out.drop(columns=[acol])
+
+
+def _probe_excel_header_row(file_obj) -> int:
+    """Find 0-based header row for Excel files with leading title rows (e.g. Associate Productivity)."""
+    last_err: Exception | None = None
+    for header_row in range(_EXCEL_HEADER_PROBE_MAX):
+        file_obj.seek(0)
+        try:
+            df = pd.read_excel(file_obj, header=header_row, dtype_backend="numpy_nullable")
+        except Exception as exc:
+            last_err = exc
+            continue
+        if df.empty or df.shape[1] < 3:
+            continue
+        df = _normalize_columns(df.copy())
+        df = _preprocess_productivity_style_columns(df)
+        try:
+            _canonicalize_columns(df)
+        except ValueError as exc:
+            last_err = exc
+            continue
+        return header_row
+    base = (
+        "Could not find a header row with required timesheet columns in the first "
+        f"{_EXCEL_HEADER_PROBE_MAX} rows of the Excel file."
+    )
+    if last_err:
+        raise ValueError(base + " " + str(last_err)) from last_err
+    raise ValueError(base)
+
+
+def _read_excel_file(file_obj) -> pd.DataFrame:
+    header_row = _probe_excel_header_row(file_obj)
+    file_obj.seek(0)
+    return pd.read_excel(file_obj, header=header_row, dtype_backend="numpy_nullable")
 
 
 def _read_csv_bytes(raw_bytes: bytes) -> pd.DataFrame:
@@ -167,7 +474,7 @@ def _read_source_file(file_obj, filename: str) -> pd.DataFrame:
         return _read_csv_bytes(raw_bytes)
     if extension in {".xlsx", ".xls"}:
         file_obj.seek(0)
-        return pd.read_excel(file_obj, dtype_backend="numpy_nullable")
+        return _read_excel_file(file_obj)
     raise ValueError("Unsupported file format. Please upload .xlsx, .xls, or .csv.")
 
 
@@ -202,7 +509,7 @@ def _prepare_clean_rows(file_obj, filename: str | None = None) -> pd.DataFrame:
             "Could not read the file. Please upload a valid .xlsx, .xls, or .csv."
         ) from exc
 
-    raw = _canonicalize_columns(_normalize_columns(raw))
+    raw = _canonicalize_columns(_preprocess_productivity_style_columns(_normalize_columns(raw)))
     selected_columns = [*REQUIRED_COLUMNS, *[c for c in OPTIONAL_COLUMNS if c in raw.columns]]
     df = raw[selected_columns].copy()
     df["First Name"] = df["First Name"].astype(str).str.strip()
@@ -256,6 +563,11 @@ def _prepare_clean_rows(file_obj, filename: str | None = None) -> pd.DataFrame:
         df["Employee Name"] = df["Employee Name"].replace({"nan": ""})
     else:
         df["Employee Name"] = ""
+    if "Employee Classification" in df.columns:
+        df["Employee Classification"] = df["Employee Classification"].astype(str).str.strip()
+        df["Employee Classification"] = df["Employee Classification"].replace({"nan": ""})
+    else:
+        df["Employee Classification"] = ""
     df["Source File"] = Path(source_name).name if source_name else "uploaded_file"
     return df
 
@@ -288,6 +600,7 @@ def _build_timesheet_output(df: pd.DataFrame) -> tuple[pd.DataFrame, BytesIO]:
         df["Service Date"].astype(str) + " " + df["Actual Time Out"].astype(str),
         errors="coerce",
     )
+    class_df = _build_classification_frame(df)
     group_keys = ["Source File", "Employee", "Identifier", "Employee Label", "Service Date"]
     call_hours = (
         df.groupby(group_keys, as_index=False)
@@ -736,6 +1049,22 @@ def _build_timesheet_output(df: pd.DataFrame) -> tuple[pd.DataFrame, BytesIO]:
             tms_sheet.write(0, 1, "employee_name", ehs_header_fmt)
             tms_sheet.write(0, 2, "employee_id", ehs_header_fmt)
             tms_sheet.write(0, 3, "total_miles", ehs_header_fmt)
+
+        section_title_fmt = writer.book.add_format(
+            {"bold": True, "font_size": 13, "bg_color": "#D9E2F3", "border": 1, "valign": "vcenter"}
+        )
+        subsection_fmt = writer.book.add_format({"bold": True, "bg_color": "#E8EEF9", "border": 1})
+        clf_sheet = writer.book.add_worksheet(CLASSIFICATION_SHEET_NAME)
+        _write_classification_summary_sheet(
+            writer.book,
+            clf_sheet,
+            class_df,
+            section_title_fmt=section_title_fmt,
+            subsection_fmt=subsection_fmt,
+            header_fmt=ehs_header_fmt,
+            text_fmt=ehs_text_fmt,
+            num_fmt=ehs_hours_fmt,
+        )
     excel_stream.seek(0)
 
     return output, excel_stream
