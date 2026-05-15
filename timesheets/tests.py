@@ -566,6 +566,14 @@ class ProcessTimesheetTests(SimpleTestCase):
         self.assertEqual(hours_for_service_row("patient phone calls"), 0.25)
         self.assertEqual(hours_for_service_row("hha visit"), 1.0)
 
+        found_ann_pt_eval = False
+        for row in rows:
+            if len(row) >= 4 and row[1] == "Hire, Ann" and row[2] == "pt eval":
+                self.assertEqual(int(row[3]), 2)
+                found_ann_pt_eval = True
+                break
+        self.assertTrue(found_ann_pt_eval)
+
     def test_filter_timesheet_fact_rows_excludes_totals(self):
         frame = pd.DataFrame(
             {

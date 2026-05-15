@@ -220,6 +220,43 @@ def _build_classification_frame(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _write_service_by_employee_block(
+    sheet,
+    sub: pd.DataFrame,
+    r: int,
+    *,
+    subsection_fmt,
+    header_fmt,
+    text_fmt,
+    num_fmt,
+) -> int:
+    """Append Service by employee (Source File, Employee, Service, line count) table; return next row index."""
+    r += 1
+    sheet.write(r, 0, "Service by employee", subsection_fmt)
+    r += 1
+    sheet.write(r, 0, "Source File", header_fmt)
+    sheet.write(r, 1, "Employee", header_fmt)
+    sheet.write(r, 2, "Service", header_fmt)
+    sheet.write(r, 3, "Line count", header_fmt)
+    r += 1
+    if sub.empty:
+        sheet.write(r, 0, "(no rows in this classification)", text_fmt)
+        return r + 1
+    by_emp = (
+        sub.groupby(["source_file", "employee_label", "service_display"], sort=False)
+        .size()
+        .reset_index(name="line_count")
+    )
+    by_emp = by_emp.sort_values(["source_file", "employee_label", "service_display"], kind="stable")
+    for _, er in by_emp.iterrows():
+        sheet.write_string(r, 0, str(er["source_file"]), text_fmt)
+        sheet.write_string(r, 1, str(er["employee_label"]), text_fmt)
+        sheet.write_string(r, 2, str(er["service_display"]), text_fmt)
+        sheet.write_number(r, 3, int(er["line_count"]), num_fmt)
+        r += 1
+    return r
+
+
 def _write_classification_summary_sheet(
     book,
     sheet,
@@ -271,6 +308,15 @@ def _write_classification_summary_sheet(
                 sheet.write_number(r, 1, int(gr["line_count"]), num_fmt)
                 r += 1
             r += 1
+            r = _write_service_by_employee_block(
+                sheet,
+                sub,
+                r,
+                subsection_fmt=subsection_fmt,
+                header_fmt=header_fmt,
+                text_fmt=text_fmt,
+                num_fmt=num_fmt,
+            )
             total_miles = float(sub["travel_miles"].sum())
             sheet.write(r, 0, "Total miles (all services)", subsection_fmt)
             sheet.write_number(r, 1, round(total_miles, 2), num_fmt)
@@ -311,6 +357,15 @@ def _write_classification_summary_sheet(
                 sheet.write_number(r, 2, round(float(gr["total_hours"]), 2), num_fmt)
                 r += 1
             r += 1
+            r = _write_service_by_employee_block(
+                sheet,
+                sub,
+                r,
+                subsection_fmt=subsection_fmt,
+                header_fmt=header_fmt,
+                text_fmt=text_fmt,
+                num_fmt=num_fmt,
+            )
             total_miles = float(sub["travel_miles"].sum())
             sheet.write(r, 0, "Total miles (all services)", subsection_fmt)
             sheet.write_number(r, 1, round(total_miles, 2), num_fmt)
@@ -353,6 +408,15 @@ def _write_classification_summary_sheet(
                 sheet.write_number(r, 2, round(float(gr["total_hours"]), 2), num_fmt)
                 r += 1
             r += 1
+            r = _write_service_by_employee_block(
+                sheet,
+                sub,
+                r,
+                subsection_fmt=subsection_fmt,
+                header_fmt=header_fmt,
+                text_fmt=text_fmt,
+                num_fmt=num_fmt,
+            )
             total_miles = float(sub["travel_miles"].sum())
             sheet.write(r, 0, "Total miles (all services)", subsection_fmt)
             sheet.write_number(r, 1, round(total_miles, 2), num_fmt)
@@ -363,6 +427,7 @@ def _write_classification_summary_sheet(
     sheet.set_column(0, 0, 36)
     sheet.set_column(1, 1, 40)
     sheet.set_column(2, 2, 14)
+    sheet.set_column(3, 3, 14)
 
 
 def _canonicalize_columns(df: pd.DataFrame) -> pd.DataFrame:
