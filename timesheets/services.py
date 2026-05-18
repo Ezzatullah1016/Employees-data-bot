@@ -22,6 +22,7 @@ OPTIONAL_COLUMNS = [
     "Earnings Code",
     "Pay Units",
     "Travel Miles",
+    "Week",
 ]
 
 HEADER_ALIASES = {
@@ -83,8 +84,10 @@ HEADER_ALIASES = {
         "payroll classification",
         "classification",
     },
+    "Week": {"week", "payroll week", "week ending", "week range"},
 }
 CLASSIFICATION_SHEET_NAME = "Staff Classification Summary"
+_IV_SERVICE_RE = re.compile(r"\biv\b", re.IGNORECASE)
 CLASSIFICATION_BUCKETS_ORDER: tuple[str, ...] = (
     "Contractors",
     "Field Staff - Part Time",
@@ -160,6 +163,16 @@ def _normalize_employee_classification(raw: object) -> str:
     return "Unclassified"
 
 
+def _is_iv_visit_service(service_display: str, service_code: str = "") -> bool:
+    desc = str(service_display or "").strip()
+    code = str(service_code or "").strip().upper()
+    if code == "IV":
+        return True
+    if not desc or desc.lower() in {"nan", "(no service)"}:
+        return False
+    return bool(_IV_SERVICE_RE.search(desc))
+
+
 def _classification_mode_for_series(values: pd.Series) -> str:
     series = pd.Series(values).dropna()
     if series.empty:
@@ -208,19 +221,84 @@ def _build_classification_frame(df: pd.DataFrame) -> pd.DataFrame:
     span_hours = (tout_adj - tin).dt.total_seconds() / 3600.0
     row_hours.loc[valid] = span_hours.loc[valid].fillna(0.0).astype(float)
 
+    svc_dates = pd.to_datetime(df["Service Date"], errors="coerce")
+    week_from_date = _sunday_week_column_label(svc_dates)
+    if "Week" in df.columns:
+        week_raw = df["Week"].fillna("").astype(str).str.strip().replace({"nan": "", "NaT": "", "<NA>": ""})
+        week_label = week_raw.where(week_raw.ne(""), week_from_date)
+    else:
+        week_label = week_from_date
+
     return pd.DataFrame(
         {
             "source_file": df["Source File"].astype(str),
             "employee_label": df["Employee Label"].astype(str),
             "employee_bucket": employee_bucket.astype(str),
             "service_display": display.astype(str),
+            "service_code": svc_code.astype(str),
+            "week_label": week_label.astype(str),
             "row_hours": row_hours.astype(float),
             "travel_miles": pd.to_numeric(df["Travel Miles"], errors="coerce").fillna(0.0).astype(float),
         }
     )
 
 
-def _write_service_by_employee_block(
+def _write_employee_service_tally_block(
+    sheet,
+    sub: pd.DataFrame,
+    r: int,
+    *,
+    subsection_fmt,
+    header_fmt,
+    text_fmt,
+    num_fmt,
+    include_hours: bool = True,
+    include_miles: bool = True,
+) -> int:
+    """Per-employee service lines (one row per visit reason); optional hours and miles."""
+    r += 1
+    sheet.write(r, 0, "Service line count by employee", subsection_fmt)
+    r += 1
+    sheet.write(r, 0, "Source File", header_fmt)
+    sheet.write(r, 1, "Employee", header_fmt)
+    sheet.write(r, 2, "Service", header_fmt)
+    sheet.write(r, 3, "Line count", header_fmt)
+    col = 4
+    if include_hours:
+        sheet.write(r, col, "Total hours", header_fmt)
+        col += 1
+    if include_miles:
+        sheet.write(r, col, "Miles", header_fmt)
+    r += 1
+    if sub.empty:
+        sheet.write(r, 0, "(no rows in this classification)", text_fmt)
+        return r + 1
+    by_emp = (
+        sub.groupby(["source_file", "employee_label", "service_display"], sort=False)
+        .agg(
+            line_count=("service_display", "size"),
+            total_hours=("row_hours", "sum"),
+            miles=("travel_miles", "sum"),
+        )
+        .reset_index()
+    )
+    by_emp = by_emp.sort_values(["source_file", "employee_label", "service_display"], kind="stable")
+    for _, er in by_emp.iterrows():
+        sheet.write_string(r, 0, str(er["source_file"]), text_fmt)
+        sheet.write_string(r, 1, str(er["employee_label"]), text_fmt)
+        sheet.write_string(r, 2, str(er["service_display"]), text_fmt)
+        sheet.write_number(r, 3, int(er["line_count"]), num_fmt)
+        c = 4
+        if include_hours:
+            sheet.write_number(r, c, round(float(er["total_hours"]), 2), num_fmt)
+            c += 1
+        if include_miles:
+            sheet.write_number(r, c, round(float(er["miles"]), 2), num_fmt)
+        r += 1
+    return r
+
+
+def _write_ft_iv_visits_by_week_block(
     sheet,
     sub: pd.DataFrame,
     r: int,
@@ -230,29 +308,38 @@ def _write_service_by_employee_block(
     text_fmt,
     num_fmt,
 ) -> int:
-    """Append Service by employee (Source File, Employee, Service, line count) table; return next row index."""
+    """Full-time staff with IV visit reason, grouped by week; hours are IV lines only."""
     r += 1
-    sheet.write(r, 0, "Service by employee", subsection_fmt)
+    sheet.write(r, 0, "IV visits by week (full-time staff)", subsection_fmt)
     r += 1
     sheet.write(r, 0, "Source File", header_fmt)
     sheet.write(r, 1, "Employee", header_fmt)
-    sheet.write(r, 2, "Service", header_fmt)
-    sheet.write(r, 3, "Line count", header_fmt)
+    sheet.write(r, 2, "Week", header_fmt)
+    sheet.write(r, 3, "IV line count", header_fmt)
+    sheet.write(r, 4, "Total IV hours", header_fmt)
     r += 1
-    if sub.empty:
-        sheet.write(r, 0, "(no rows in this classification)", text_fmt)
+    iv_mask = sub["service_display"].map(lambda s: _is_iv_visit_service(str(s)))
+    if "service_code" in sub.columns:
+        iv_mask = iv_mask | sub["service_code"].fillna("").astype(str).str.strip().str.upper().eq("IV")
+    iv_sub = sub.loc[iv_mask].copy()
+    if iv_sub.empty:
+        sheet.write(r, 0, "(no IV visit rows for full-time staff)", text_fmt)
         return r + 1
-    by_emp = (
-        sub.groupby(["source_file", "employee_label", "service_display"], sort=False)
-        .size()
-        .reset_index(name="line_count")
+    by_week = (
+        iv_sub.groupby(["source_file", "employee_label", "week_label"], sort=False)
+        .agg(
+            line_count=("service_display", "size"),
+            total_iv_hours=("row_hours", "sum"),
+        )
+        .reset_index()
     )
-    by_emp = by_emp.sort_values(["source_file", "employee_label", "service_display"], kind="stable")
-    for _, er in by_emp.iterrows():
+    by_week = by_week.sort_values(["source_file", "employee_label", "week_label"], kind="stable")
+    for _, er in by_week.iterrows():
         sheet.write_string(r, 0, str(er["source_file"]), text_fmt)
         sheet.write_string(r, 1, str(er["employee_label"]), text_fmt)
-        sheet.write_string(r, 2, str(er["service_display"]), text_fmt)
+        sheet.write_string(r, 2, str(er["week_label"]), text_fmt)
         sheet.write_number(r, 3, int(er["line_count"]), num_fmt)
+        sheet.write_number(r, 4, round(float(er["total_iv_hours"]), 2), num_fmt)
         r += 1
     return r
 
@@ -271,44 +358,29 @@ def _write_classification_summary_sheet(
     r = 0
     for bucket in CLASSIFICATION_BUCKETS_ORDER:
         sub = class_df.loc[class_df["employee_bucket"] == bucket].copy()
-        sheet.merge_range(r, 0, r, 3, bucket, section_title_fmt)
+        sheet.merge_range(r, 0, r, 4, bucket, section_title_fmt)
         r += 1
 
-        sheet.write(r, 0, "Employees", subsection_fmt)
-        r += 1
-        sheet.write(r, 0, "Source File", header_fmt)
-        sheet.write(r, 1, "Employee", header_fmt)
-        r += 1
-        emp_tbl = sub[["source_file", "employee_label"]].drop_duplicates()
-        emp_tbl = emp_tbl.sort_values(["source_file", "employee_label"], kind="stable")
-        if emp_tbl.empty:
-            sheet.write(r, 0, "(no rows in this classification)", text_fmt)
-            r += 1
-        else:
-            for _, er in emp_tbl.iterrows():
-                sheet.write_string(r, 0, str(er["source_file"]), text_fmt)
-                sheet.write_string(r, 1, str(er["employee_label"]), text_fmt)
-                r += 1
-
-        r += 1
-        sheet.write(r, 0, "Service summary", subsection_fmt)
-        r += 1
-
-        if bucket == "Contractors":
-            grp = (
-                sub.groupby("service_display", sort=True)
-                .agg(line_count=("service_display", "size"), miles=("travel_miles", "sum"))
-                .reset_index()
+        if bucket in ("Contractors", "Field Staff - Part Time"):
+            r = _write_employee_service_tally_block(
+                sheet,
+                sub,
+                r,
+                subsection_fmt=subsection_fmt,
+                header_fmt=header_fmt,
+                text_fmt=text_fmt,
+                num_fmt=num_fmt,
+                include_hours=True,
+                include_miles=True,
             )
-            sheet.write(r, 0, "Service", header_fmt)
-            sheet.write(r, 1, "Line count", header_fmt)
-            r += 1
-            for _, gr in grp.iterrows():
-                sheet.write_string(r, 0, str(gr["service_display"]), text_fmt)
-                sheet.write_number(r, 1, int(gr["line_count"]), num_fmt)
+            if not sub.empty and float(sub["travel_miles"].sum()) > 0:
                 r += 1
-            r += 1
-            r = _write_service_by_employee_block(
+                sheet.write(r, 0, "Total miles (section)", subsection_fmt)
+                sheet.write_number(r, 1, round(float(sub["travel_miles"].sum()), 2), num_fmt)
+                r += 1
+
+        elif bucket == "Field Staff - Full Time":
+            r = _write_ft_iv_visits_by_week_block(
                 sheet,
                 sub,
                 r,
@@ -317,98 +389,9 @@ def _write_classification_summary_sheet(
                 text_fmt=text_fmt,
                 num_fmt=num_fmt,
             )
-            total_miles = float(sub["travel_miles"].sum())
-            sheet.write(r, 0, "Total miles (all services)", subsection_fmt)
-            sheet.write_number(r, 1, round(total_miles, 2), num_fmt)
-            r += 1
-            r += 1
-            sheet.write(r, 0, "Miles by service", subsection_fmt)
-            r += 1
-            sheet.write(r, 0, "Service", header_fmt)
-            sheet.write(r, 1, "Miles", header_fmt)
-            r += 1
-            miles_svc = grp.loc[grp["miles"] > 0, ["service_display", "miles"]].sort_values("service_display")
-            if miles_svc.empty:
-                sheet.write(r, 0, "(no mileage on lines)", text_fmt)
-                r += 1
-            else:
-                for _, mr in miles_svc.iterrows():
-                    sheet.write_string(r, 0, str(mr["service_display"]), text_fmt)
-                    sheet.write_number(r, 1, round(float(mr["miles"]), 2), num_fmt)
-                    r += 1
-
-        elif bucket == "Field Staff - Part Time":
-            grp = (
-                sub.groupby("service_display", sort=True)
-                .agg(
-                    line_count=("service_display", "size"),
-                    total_hours=("row_hours", "sum"),
-                    miles=("travel_miles", "sum"),
-                )
-                .reset_index()
-            )
-            sheet.write(r, 0, "Service", header_fmt)
-            sheet.write(r, 1, "Line count", header_fmt)
-            sheet.write(r, 2, "Total hours", header_fmt)
-            r += 1
-            for _, gr in grp.iterrows():
-                sheet.write_string(r, 0, str(gr["service_display"]), text_fmt)
-                sheet.write_number(r, 1, int(gr["line_count"]), num_fmt)
-                sheet.write_number(r, 2, round(float(gr["total_hours"]), 2), num_fmt)
-                r += 1
-            r += 1
-            r = _write_service_by_employee_block(
-                sheet,
-                sub,
-                r,
-                subsection_fmt=subsection_fmt,
-                header_fmt=header_fmt,
-                text_fmt=text_fmt,
-                num_fmt=num_fmt,
-            )
-            total_miles = float(sub["travel_miles"].sum())
-            sheet.write(r, 0, "Total miles (all services)", subsection_fmt)
-            sheet.write_number(r, 1, round(total_miles, 2), num_fmt)
-            r += 1
-            r += 1
-            sheet.write(r, 0, "Mileage by staff", subsection_fmt)
-            r += 1
-            sheet.write(r, 0, "Source File", header_fmt)
-            sheet.write(r, 1, "Employee", header_fmt)
-            sheet.write(r, 2, "Total miles", header_fmt)
-            r += 1
-            miles_staff = (
-                sub.groupby(["source_file", "employee_label"], sort=False)["travel_miles"].sum().reset_index()
-            )
-            miles_staff = miles_staff.sort_values(["source_file", "employee_label"], kind="stable")
-            for _, mr in miles_staff.iterrows():
-                sheet.write_string(r, 0, str(mr["source_file"]), text_fmt)
-                sheet.write_string(r, 1, str(mr["employee_label"]), text_fmt)
-                sheet.write_number(r, 2, round(float(mr["travel_miles"]), 2), num_fmt)
-                r += 1
 
         else:
-            # Field Staff - Full Time and Unclassified
-            grp = (
-                sub.groupby("service_display", sort=True)
-                .agg(
-                    line_count=("service_display", "size"),
-                    total_hours=("row_hours", "sum"),
-                    miles=("travel_miles", "sum"),
-                )
-                .reset_index()
-            )
-            sheet.write(r, 0, "Service", header_fmt)
-            sheet.write(r, 1, "Line count", header_fmt)
-            sheet.write(r, 2, "Total hours", header_fmt)
-            r += 1
-            for _, gr in grp.iterrows():
-                sheet.write_string(r, 0, str(gr["service_display"]), text_fmt)
-                sheet.write_number(r, 1, int(gr["line_count"]), num_fmt)
-                sheet.write_number(r, 2, round(float(gr["total_hours"]), 2), num_fmt)
-                r += 1
-            r += 1
-            r = _write_service_by_employee_block(
+            r = _write_employee_service_tally_block(
                 sheet,
                 sub,
                 r,
@@ -416,18 +399,17 @@ def _write_classification_summary_sheet(
                 header_fmt=header_fmt,
                 text_fmt=text_fmt,
                 num_fmt=num_fmt,
+                include_hours=True,
+                include_miles=False,
             )
-            total_miles = float(sub["travel_miles"].sum())
-            sheet.write(r, 0, "Total miles (all services)", subsection_fmt)
-            sheet.write_number(r, 1, round(total_miles, 2), num_fmt)
-            r += 1
 
         r += 2
 
     sheet.set_column(0, 0, 36)
     sheet.set_column(1, 1, 40)
-    sheet.set_column(2, 2, 14)
+    sheet.set_column(2, 2, 28)
     sheet.set_column(3, 3, 14)
+    sheet.set_column(4, 4, 14)
 
 
 def _canonicalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -633,6 +615,9 @@ def _prepare_clean_rows(file_obj, filename: str | None = None) -> pd.DataFrame:
         df["Employee Classification"] = df["Employee Classification"].replace({"nan": ""})
     else:
         df["Employee Classification"] = ""
+    if "Week" in df.columns:
+        df["Week"] = df["Week"].astype(str).str.strip()
+        df["Week"] = df["Week"].replace({"nan": ""})
     df["Source File"] = Path(source_name).name if source_name else "uploaded_file"
     return df
 

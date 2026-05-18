@@ -6,6 +6,7 @@ from django.test import SimpleTestCase
 from openpyxl import load_workbook
 
 from .services import (
+    CLASSIFICATION_BUCKETS_ORDER,
     CLASSIFICATION_SHEET_NAME,
     filter_timesheet_fact_rows,
     process_timesheet,
@@ -548,31 +549,101 @@ class ProcessTimesheetTests(SimpleTestCase):
                 v0 = row[0] if row else None
                 if v0 == title:
                     seen = True
-                elif seen and v0 == "Total miles (all services)":
+                elif seen and v0 == "Total miles (section)":
                     return float(row[1])
             raise AssertionError(f"no Total miles after {title!r}")
 
         self.assertEqual(first_total_miles_after_title("Contractors"), 5.0)
         self.assertEqual(first_total_miles_after_title("Field Staff - Part Time"), 10.0)
-        self.assertEqual(first_total_miles_after_title("Field Staff - Full Time"), 1.0)
-
-        def hours_for_service_row(svc: str) -> float:
-            for row in rows:
-                if row[0] == svc and row[2] is not None:
-                    return float(row[2])
-            raise AssertionError(f"no service row {svc!r}")
-
-        self.assertEqual(hours_for_service_row("rn soc assessment"), 4.0)
-        self.assertEqual(hours_for_service_row("patient phone calls"), 0.25)
-        self.assertEqual(hours_for_service_row("hha visit"), 1.0)
 
         found_ann_pt_eval = False
+        found_ben_rn = False
+        in_contractors = False
+        in_pt = False
         for row in rows:
-            if len(row) >= 4 and row[1] == "Hire, Ann" and row[2] == "pt eval":
+            v0 = row[0] if row else None
+            if v0 == "Contractors":
+                in_contractors = True
+                in_pt = False
+            elif v0 == "Field Staff - Part Time":
+                in_pt = True
+                in_contractors = False
+            elif v0 in CLASSIFICATION_BUCKETS_ORDER:
+                in_pt = False
+                in_contractors = False
+            if in_contractors and len(row) >= 5 and row[1] == "Hire, Ann" and row[2] == "pt eval":
                 self.assertEqual(int(row[3]), 2)
                 found_ann_pt_eval = True
-                break
+            if in_pt and len(row) >= 5 and row[1] == "Part, Ben" and row[2] == "rn soc assessment":
+                self.assertEqual(int(row[3]), 1)
+                self.assertEqual(float(row[4]), 4.0)
+                found_ben_rn = True
         self.assertTrue(found_ann_pt_eval)
+        self.assertTrue(found_ben_rn)
+
+    def test_ft_iv_visits_by_week_on_classification_sheet(self):
+        source = pd.DataFrame(
+            [
+                {
+                    "Employment Type": "Field Staff - Full Time",
+                    "First Name": "Dana",
+                    "Last Name": "Ivory",
+                    "Week": "2026-02-02 - 2026-02-08",
+                    "Service Date": "2026-02-03",
+                    "Service Description": "IV Visit",
+                    "Actual Time In": "09:00 AM",
+                    "Actual Time Out": "10:30 AM",
+                    "Travel Miles": 0,
+                },
+                {
+                    "Employment Type": "Field Staff - Full Time",
+                    "First Name": "Dana",
+                    "Last Name": "Ivory",
+                    "Week": "2026-02-02 - 2026-02-08",
+                    "Service Date": "2026-02-04",
+                    "Service Description": "HHA Visit",
+                    "Actual Time In": "11:00 AM",
+                    "Actual Time Out": "12:00 PM",
+                    "Travel Miles": 0,
+                },
+                {
+                    "Employment Type": "Field Staff - Full Time",
+                    "First Name": "Dana",
+                    "Last Name": "Ivory",
+                    "Week": "2026-02-09 - 2026-02-15",
+                    "Service Date": "2026-02-10",
+                    "Service Description": "IV Start",
+                    "Actual Time In": "08:00 AM",
+                    "Actual Time Out": "09:00 AM",
+                    "Travel Miles": 0,
+                },
+            ]
+        )
+        buf = BytesIO(source.to_csv(index=False).encode("utf-8"))
+        buf.seek(0)
+        _, excel_buf = process_timesheet(buf, filename="ft_iv.csv")
+        excel_buf.seek(0)
+        wb = load_workbook(excel_buf, data_only=True)
+        ws = wb[CLASSIFICATION_SHEET_NAME]
+        rows = [tuple(c.value for c in r) for r in ws.iter_rows()]
+
+        in_ft_iv = False
+        week1_hours = None
+        week2_hours = None
+        for row in rows:
+            v0 = row[0] if row else None
+            if v0 == "IV visits by week (full-time staff)":
+                in_ft_iv = True
+                continue
+            if in_ft_iv and v0 in CLASSIFICATION_BUCKETS_ORDER:
+                break
+            if in_ft_iv and len(row) >= 5 and row[1] == "Ivory, Dana":
+                if row[2] == "2026-02-02 - 2026-02-08":
+                    week1_hours = float(row[4])
+                elif row[2] == "2026-02-09 - 2026-02-15":
+                    week2_hours = float(row[4])
+        self.assertAlmostEqual(week1_hours, 1.5, places=2)
+        self.assertAlmostEqual(week2_hours, 1.0, places=2)
 
     def test_filter_timesheet_fact_rows_excludes_totals(self):
         frame = pd.DataFrame(
