@@ -581,6 +581,40 @@ class ProcessTimesheetTests(SimpleTestCase):
         self.assertTrue(found_ann_pt_eval)
         self.assertTrue(found_ben_rn)
 
+    def test_multi_file_combines_classification_summary_by_employee(self):
+        row = {
+            "Employment Type": "Contractor",
+            "First Name": "Ann",
+            "Last Name": "Hire",
+            "Service Date": "2026-02-01",
+            "Service Description": "PT Eval",
+            "Actual Time In": "10:00 AM",
+            "Actual Time Out": "11:00 AM",
+        }
+        files = [
+            (BytesIO(pd.DataFrame([row]).to_csv(index=False).encode("utf-8")), "productivity_a.csv"),
+            (BytesIO(pd.DataFrame([row]).to_csv(index=False).encode("utf-8")), "productivity_b.csv"),
+        ]
+        _, excel_buf = process_timesheets(files)
+        excel_buf.seek(0)
+        wb = load_workbook(excel_buf, data_only=True)
+        ws = wb[CLASSIFICATION_SHEET_NAME]
+        rows = [tuple(c.value for c in r) for r in ws.iter_rows()]
+
+        self.assertTrue(any(r and r[0] == "Combined upload summary" for r in rows))
+
+        pt_eval_counts: list[int] = []
+        in_contractors = False
+        for row in rows:
+            v0 = row[0] if row else None
+            if v0 == "Contractors":
+                in_contractors = True
+            elif v0 in CLASSIFICATION_BUCKETS_ORDER:
+                in_contractors = False
+            if in_contractors and len(row) >= 3 and row[0] == "Hire, Ann" and row[1] == "pt eval":
+                pt_eval_counts.append(int(row[2]))
+        self.assertEqual(pt_eval_counts, [2])
+
     def test_ft_iv_visits_by_week_on_classification_sheet(self):
         source = pd.DataFrame(
             [

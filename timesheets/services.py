@@ -149,8 +149,10 @@ def _normalize_employee_classification(raw: object) -> str:
     for ch in ("\u2013", "\u2014", "\u2212"):
         text = text.replace(ch, "-")
     s = _sanitize(text)
-    if "contract" in s or "1099" in s or "independent contractor" in s:
+    if s in {"ct", "contractor"} or "contract" in s or "1099" in s or "independent contractor" in s:
         return "Contractors"
+    if s == "pt":
+        return "Field Staff - Part Time"
     if "field staff" in s:
         if "part" in s:
             return "Field Staff - Part Time"
@@ -205,7 +207,7 @@ def _build_classification_frame(df: pd.DataFrame) -> pd.DataFrame:
     )
     tmp = df[["Source File", "Employee Label"]].copy()
     tmp["_row_bucket"] = row_cls
-    employee_bucket = tmp.groupby(["Source File", "Employee Label"], sort=False)["_row_bucket"].transform(
+    employee_bucket = tmp.groupby("Employee Label", sort=False)["_row_bucket"].transform(
         _classification_mode_for_series
     )
 
@@ -254,16 +256,22 @@ def _write_employee_service_tally_block(
     num_fmt,
     include_hours: bool = True,
     include_miles: bool = True,
+    combine_sources: bool = False,
 ) -> int:
     """Per-employee service lines (one row per visit reason); optional hours and miles."""
     r += 1
     sheet.write(r, 0, "Service line count by employee", subsection_fmt)
     r += 1
-    sheet.write(r, 0, "Source File", header_fmt)
-    sheet.write(r, 1, "Employee", header_fmt)
-    sheet.write(r, 2, "Service", header_fmt)
-    sheet.write(r, 3, "Line count", header_fmt)
-    col = 4
+    col = 0
+    if not combine_sources:
+        sheet.write(r, col, "Source File", header_fmt)
+        col += 1
+    sheet.write(r, col, "Employee", header_fmt)
+    col += 1
+    sheet.write(r, col, "Service", header_fmt)
+    col += 1
+    sheet.write(r, col, "Line count", header_fmt)
+    col += 1
     if include_hours:
         sheet.write(r, col, "Total hours", header_fmt)
         col += 1
@@ -273,8 +281,13 @@ def _write_employee_service_tally_block(
     if sub.empty:
         sheet.write(r, 0, "(no rows in this classification)", text_fmt)
         return r + 1
+    group_keys = ["employee_label", "service_display"] if combine_sources else [
+        "source_file",
+        "employee_label",
+        "service_display",
+    ]
     by_emp = (
-        sub.groupby(["source_file", "employee_label", "service_display"], sort=False)
+        sub.groupby(group_keys, sort=False)
         .agg(
             line_count=("service_display", "size"),
             total_hours=("row_hours", "sum"),
@@ -282,13 +295,19 @@ def _write_employee_service_tally_block(
         )
         .reset_index()
     )
-    by_emp = by_emp.sort_values(["source_file", "employee_label", "service_display"], kind="stable")
+    sort_cols = group_keys
+    by_emp = by_emp.sort_values(sort_cols, kind="stable")
     for _, er in by_emp.iterrows():
-        sheet.write_string(r, 0, str(er["source_file"]), text_fmt)
-        sheet.write_string(r, 1, str(er["employee_label"]), text_fmt)
-        sheet.write_string(r, 2, str(er["service_display"]), text_fmt)
-        sheet.write_number(r, 3, int(er["line_count"]), num_fmt)
-        c = 4
+        c = 0
+        if not combine_sources:
+            sheet.write_string(r, c, str(er["source_file"]), text_fmt)
+            c += 1
+        sheet.write_string(r, c, str(er["employee_label"]), text_fmt)
+        c += 1
+        sheet.write_string(r, c, str(er["service_display"]), text_fmt)
+        c += 1
+        sheet.write_number(r, c, int(er["line_count"]), num_fmt)
+        c += 1
         if include_hours:
             sheet.write_number(r, c, round(float(er["total_hours"]), 2), num_fmt)
             c += 1
@@ -307,16 +326,23 @@ def _write_ft_iv_visits_by_week_block(
     header_fmt,
     text_fmt,
     num_fmt,
+    combine_sources: bool = False,
 ) -> int:
     """Full-time staff with IV visit reason, grouped by week; hours are IV lines only."""
     r += 1
     sheet.write(r, 0, "IV visits by week (full-time staff)", subsection_fmt)
     r += 1
-    sheet.write(r, 0, "Source File", header_fmt)
-    sheet.write(r, 1, "Employee", header_fmt)
-    sheet.write(r, 2, "Week", header_fmt)
-    sheet.write(r, 3, "IV line count", header_fmt)
-    sheet.write(r, 4, "Total IV hours", header_fmt)
+    col = 0
+    if not combine_sources:
+        sheet.write(r, col, "Source File", header_fmt)
+        col += 1
+    sheet.write(r, col, "Employee", header_fmt)
+    col += 1
+    sheet.write(r, col, "Week", header_fmt)
+    col += 1
+    sheet.write(r, col, "IV line count", header_fmt)
+    col += 1
+    sheet.write(r, col, "Total IV hours", header_fmt)
     r += 1
     iv_mask = sub["service_display"].map(lambda s: _is_iv_visit_service(str(s)))
     if "service_code" in sub.columns:
@@ -325,21 +351,32 @@ def _write_ft_iv_visits_by_week_block(
     if iv_sub.empty:
         sheet.write(r, 0, "(no IV visit rows for full-time staff)", text_fmt)
         return r + 1
+    group_keys = ["employee_label", "week_label"] if combine_sources else [
+        "source_file",
+        "employee_label",
+        "week_label",
+    ]
     by_week = (
-        iv_sub.groupby(["source_file", "employee_label", "week_label"], sort=False)
+        iv_sub.groupby(group_keys, sort=False)
         .agg(
             line_count=("service_display", "size"),
             total_iv_hours=("row_hours", "sum"),
         )
         .reset_index()
     )
-    by_week = by_week.sort_values(["source_file", "employee_label", "week_label"], kind="stable")
+    by_week = by_week.sort_values(group_keys, kind="stable")
     for _, er in by_week.iterrows():
-        sheet.write_string(r, 0, str(er["source_file"]), text_fmt)
-        sheet.write_string(r, 1, str(er["employee_label"]), text_fmt)
-        sheet.write_string(r, 2, str(er["week_label"]), text_fmt)
-        sheet.write_number(r, 3, int(er["line_count"]), num_fmt)
-        sheet.write_number(r, 4, round(float(er["total_iv_hours"]), 2), num_fmt)
+        c = 0
+        if not combine_sources:
+            sheet.write_string(r, c, str(er["source_file"]), text_fmt)
+            c += 1
+        sheet.write_string(r, c, str(er["employee_label"]), text_fmt)
+        c += 1
+        sheet.write_string(r, c, str(er["week_label"]), text_fmt)
+        c += 1
+        sheet.write_number(r, c, int(er["line_count"]), num_fmt)
+        c += 1
+        sheet.write_number(r, c, round(float(er["total_iv_hours"]), 2), num_fmt)
         r += 1
     return r
 
@@ -356,6 +393,19 @@ def _write_classification_summary_sheet(
     num_fmt,
 ) -> None:
     r = 0
+    source_files = sorted(class_df["source_file"].dropna().unique().tolist()) if len(class_df) else []
+    combine_sources = len(source_files) > 1
+    if combine_sources:
+        sheet.merge_range(r, 0, r, 4, "Combined upload summary", section_title_fmt)
+        r += 1
+        sheet.write(
+            r,
+            0,
+            "Source files combined into one classification summary: " + ", ".join(source_files),
+            text_fmt,
+        )
+        r += 2
+
     for bucket in CLASSIFICATION_BUCKETS_ORDER:
         sub = class_df.loc[class_df["employee_bucket"] == bucket].copy()
         sheet.merge_range(r, 0, r, 4, bucket, section_title_fmt)
@@ -372,6 +422,7 @@ def _write_classification_summary_sheet(
                 num_fmt=num_fmt,
                 include_hours=True,
                 include_miles=True,
+                combine_sources=combine_sources,
             )
             if not sub.empty and float(sub["travel_miles"].sum()) > 0:
                 r += 1
@@ -388,6 +439,7 @@ def _write_classification_summary_sheet(
                 header_fmt=header_fmt,
                 text_fmt=text_fmt,
                 num_fmt=num_fmt,
+                combine_sources=combine_sources,
             )
 
         else:
@@ -401,6 +453,7 @@ def _write_classification_summary_sheet(
                 num_fmt=num_fmt,
                 include_hours=True,
                 include_miles=False,
+                combine_sources=combine_sources,
             )
 
         r += 2
