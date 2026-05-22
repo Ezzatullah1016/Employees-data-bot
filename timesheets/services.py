@@ -87,7 +87,8 @@ HEADER_ALIASES = {
     "Week": {"week", "payroll week", "week ending", "week range"},
 }
 CLASSIFICATION_SHEET_NAME = "Staff Classification Summary"
-_IV_SERVICE_RE = re.compile(r"\biv\b", re.IGNORECASE)
+# IV must appear as its own token (e.g. "rn iv visit", "LPN IV Visit"), not inside unrelated words.
+_IV_SERVICE_RE = re.compile(r"(?:^|[\s\-/])iv(?:[\s\-/]|$)", re.IGNORECASE)
 CLASSIFICATION_BUCKETS_ORDER: tuple[str, ...] = (
     "Contractors",
     "Field Staff - Part Time",
@@ -151,28 +152,42 @@ def _normalize_employee_classification(raw: object) -> str:
     s = _sanitize(text)
     if s in {"ct", "contractor"} or "contract" in s or "1099" in s or "independent contractor" in s:
         return "Contractors"
-    if s == "pt":
+    if s in {"pt"}:
         return "Field Staff - Part Time"
+    if s in {"ft", "full time", "full-time", "fulltime"}:
+        return "Field Staff - Full Time"
     if "field staff" in s:
-        if "part" in s:
+        if re.search(r"\bpart\b", s) or "part time" in s or "part-time" in s:
             return "Field Staff - Part Time"
-        if "full" in s:
+        if re.search(r"\bfull\b", s) or "full time" in s or "full-time" in s:
             return "Field Staff - Full Time"
-    if "part" in s and "time" in s:
+    if re.search(r"\bpart\b", s) and "time" in s:
         return "Field Staff - Part Time"
-    if "full" in s and "time" in s:
+    if re.search(r"\bfull\b", s) and "time" in s:
         return "Field Staff - Full Time"
     return "Unclassified"
 
 
 def _is_iv_visit_service(service_display: str, service_code: str = "") -> bool:
+    """True only when the service description/code includes IV as a distinct token."""
     desc = str(service_display or "").strip()
     code = str(service_code or "").strip().upper()
     if code == "IV":
         return True
     if not desc or desc.lower() in {"nan", "(no service)"}:
         return False
-    return bool(_IV_SERVICE_RE.search(desc))
+    normalized = _sanitize(desc)
+    if normalized == "iv":
+        return True
+    return bool(_IV_SERVICE_RE.search(normalized))
+
+
+def _resolve_employee_bucket(row_buckets: pd.Series) -> str:
+    """Pick one bucket per employee; ignore blank/Unclassified rows when any classified row exists."""
+    known = row_buckets[row_buckets != "Unclassified"]
+    if known.empty:
+        return "Unclassified"
+    return _classification_mode_for_series(known)
 
 
 def _classification_mode_for_series(values: pd.Series) -> str:
@@ -205,11 +220,7 @@ def _build_classification_frame(df: pd.DataFrame) -> pd.DataFrame:
     row_cls = (
         df["Employee Classification"].fillna("").astype(str).str.strip().replace({"nan": ""}).map(_normalize_employee_classification)
     )
-    tmp = df[["Source File", "Employee Label"]].copy()
-    tmp["_row_bucket"] = row_cls
-    employee_bucket = tmp.groupby("Employee Label", sort=False)["_row_bucket"].transform(
-        _classification_mode_for_series
-    )
+    employee_bucket = row_cls.groupby(df["Employee Label"], sort=False).transform(_resolve_employee_bucket)
 
     row_hours = pd.Series(0.0, index=df.index, dtype="float64")
     row_hours.loc[call_mask] = df.loc[call_mask, "Pay Units"].fillna(0).astype(float)
@@ -344,9 +355,10 @@ def _write_ft_iv_visits_by_week_block(
     col += 1
     sheet.write(r, col, "Total IV hours", header_fmt)
     r += 1
-    iv_mask = sub["service_display"].map(lambda s: _is_iv_visit_service(str(s)))
-    if "service_code" in sub.columns:
-        iv_mask = iv_mask | sub["service_code"].fillna("").astype(str).str.strip().str.upper().eq("IV")
+    iv_mask = sub.apply(
+        lambda row: _is_iv_visit_service(str(row["service_display"]), str(row.get("service_code", ""))),
+        axis=1,
+    )
     iv_sub = sub.loc[iv_mask].copy()
     if iv_sub.empty:
         sheet.write(r, 0, "(no IV visit rows for full-time staff)", text_fmt)
@@ -443,18 +455,30 @@ def _write_classification_summary_sheet(
             )
 
         else:
-            r = _write_employee_service_tally_block(
-                sheet,
-                sub,
-                r,
-                subsection_fmt=subsection_fmt,
-                header_fmt=header_fmt,
-                text_fmt=text_fmt,
-                num_fmt=num_fmt,
-                include_hours=True,
-                include_miles=False,
-                combine_sources=combine_sources,
-            )
+            r += 1
+            sheet.write(r, 0, "Employees without recognized classification", subsection_fmt)
+            r += 1
+            if sub.empty:
+                sheet.write(r, 0, "(no rows)", text_fmt)
+                r += 1
+            else:
+                emp_only = sub[["employee_label"]].drop_duplicates().sort_values("employee_label", kind="stable")
+                sheet.write(r, 0, "Employee", header_fmt)
+                sheet.write(r, 1, "Payroll lines", header_fmt)
+                r += 1
+                line_counts = sub.groupby("employee_label", sort=False).size()
+                for label, ct in line_counts.items():
+                    sheet.write_string(r, 0, str(label), text_fmt)
+                    sheet.write_number(r, 1, int(ct), num_fmt)
+                    r += 1
+                r += 1
+                sheet.write(
+                    r,
+                    0,
+                    "Tip: include a Classification column (Field Staff - Full Time, Part Time, Contractor) on uploads.",
+                    text_fmt,
+                )
+                r += 1
 
         r += 2
 

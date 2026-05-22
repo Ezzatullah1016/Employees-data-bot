@@ -8,6 +8,7 @@ from openpyxl import load_workbook
 from .services import (
     CLASSIFICATION_BUCKETS_ORDER,
     CLASSIFICATION_SHEET_NAME,
+    _is_iv_visit_service,
     filter_timesheet_fact_rows,
     process_timesheet,
     process_timesheets,
@@ -614,6 +615,121 @@ class ProcessTimesheetTests(SimpleTestCase):
             if in_contractors and len(row) >= 3 and row[0] == "Hire, Ann" and row[1] == "pt eval":
                 pt_eval_counts.append(int(row[2]))
         self.assertEqual(pt_eval_counts, [2])
+
+    def test_iv_service_matching_only_iv_token(self):
+        self.assertTrue(_is_iv_visit_service("rn iv visit 1st 2 hours"))
+        self.assertTrue(_is_iv_visit_service("lpn iv visit"))
+        self.assertTrue(_is_iv_visit_service("rn iv recert"))
+        self.assertFalse(_is_iv_visit_service("rn discharge"))
+        self.assertFalse(_is_iv_visit_service("rn recert"))
+        self.assertFalse(_is_iv_visit_service("rn recert w/sup"))
+        self.assertFalse(_is_iv_visit_service("rn soc assess"))
+        self.assertFalse(_is_iv_visit_service("rn roc"))
+        self.assertFalse(_is_iv_visit_service("hha visit"))
+        self.assertFalse(_is_iv_visit_service("ot visit"))
+        self.assertFalse(_is_iv_visit_service("pt visit"))
+
+    def test_ft_iv_section_excludes_non_iv_services_for_full_time_staff(self):
+        """Manpreet-style: FT employee with many RN lines; only IV rows appear under FT IV by week."""
+        rows = [
+            {
+                "Employment Type": "Field Staff - Full Time",
+                "Identifier": "HA9944",
+                "First Name": "Manpreet",
+                "Last Name": "Kaur",
+                "Week": "05/03/2026 - 05/09/2026",
+                "Service Date": "2026-05-05",
+                "Service Description": "RN Discharge",
+                "Actual Time In": "08:00 AM",
+                "Actual Time Out": "09:00 AM",
+            },
+            {
+                "Employment Type": "Field Staff - Full Time",
+                "Identifier": "HA9944",
+                "First Name": "Manpreet",
+                "Last Name": "Kaur",
+                "Week": "05/03/2026 - 05/09/2026",
+                "Service Date": "2026-05-06",
+                "Service Description": "RN IV Visit 1st 2 hours",
+                "Actual Time In": "10:00 AM",
+                "Actual Time Out": "06:00 PM",
+            },
+            {
+                "Employment Type": "Field Staff - Full Time",
+                "Identifier": "HA9944",
+                "First Name": "Manpreet",
+                "Last Name": "Kaur",
+                "Week": "05/03/2026 - 05/09/2026",
+                "Service Date": "2026-05-07",
+                "Service Description": "RN Recert",
+                "Actual Time In": "09:00 AM",
+                "Actual Time Out": "10:00 AM",
+            },
+        ]
+        buf = BytesIO(pd.DataFrame(rows).to_csv(index=False).encode("utf-8"))
+        buf.seek(0)
+        _, excel_buf = process_timesheet(buf, filename="manpreet.csv")
+        excel_buf.seek(0)
+        wb = load_workbook(excel_buf, data_only=True)
+        ws = wb[CLASSIFICATION_SHEET_NAME]
+        sheet_rows = [tuple(c.value for c in r) for r in ws.iter_rows()]
+
+        in_ft_iv = False
+        ft_iv_data_rows = 0
+        in_unclassified = False
+        unclassified_has_hha = False
+        for row in sheet_rows:
+            v0 = row[0] if row else None
+            if v0 == "IV visits by week (full-time staff)":
+                in_ft_iv = True
+                in_unclassified = False
+            elif v0 == "Unclassified":
+                in_unclassified = True
+                in_ft_iv = False
+            elif v0 in CLASSIFICATION_BUCKETS_ORDER:
+                in_ft_iv = False
+                in_unclassified = False
+            if in_ft_iv and any(c and "Kaur, Manpreet" in str(c) for c in row):
+                ft_iv_data_rows += 1
+            if in_unclassified and len(row) >= 2 and row[1] == "hha visit":
+                unclassified_has_hha = True
+
+        self.assertTrue(any("Kaur, Manpreet" in str(r) for r in sheet_rows if r))
+        self.assertEqual(ft_iv_data_rows, 1)
+        self.assertFalse(unclassified_has_hha)
+        self.assertNotIn("(no IV visit rows for full-time staff)", str(sheet_rows))
+
+    def test_ft_classification_wins_when_payroll_rows_lack_classification(self):
+        payroll_row = {
+            "First Name": "Manpreet",
+            "Last Name": "Kaur",
+            "Service Date": "2026-05-05",
+            "Service Description": "RN Discharge",
+            "Actual Time In": "08:00 AM",
+            "Actual Time Out": "09:00 AM",
+        }
+        productivity_row = {
+            "Classification": "Field Staff - Full Time",
+            "First Name": "Manpreet",
+            "Last Name": "Kaur",
+            "Week": "05/03/2026 - 05/09/2026",
+            "Service Date": "2026-05-06",
+            "Service Description": "RN IV Visit 1st 2 hours",
+            "Actual Time In": "10:00 AM",
+            "Actual Time Out": "12:00 PM",
+        }
+        files = [
+            (BytesIO(pd.DataFrame([payroll_row] * 5).to_csv(index=False).encode("utf-8")), "payroll.csv"),
+            (BytesIO(pd.DataFrame([productivity_row]).to_csv(index=False).encode("utf-8")), "productivity.csv"),
+        ]
+        _, excel_buf = process_timesheets(files)
+        excel_buf.seek(0)
+        wb = load_workbook(excel_buf, data_only=True)
+        ws = wb[CLASSIFICATION_SHEET_NAME]
+        text = "\n".join(str(c.value) for r in ws.iter_rows() for c in r if c.value)
+        self.assertIn("IV visits by week (full-time staff)", text)
+        self.assertIn("Kaur, Manpreet", text)
+        self.assertNotIn("(no IV visit rows for full-time staff)", text)
 
     def test_ft_iv_visits_by_week_on_classification_sheet(self):
         source = pd.DataFrame(
